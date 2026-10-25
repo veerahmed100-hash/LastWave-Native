@@ -1,1 +1,49 @@
+name: Build LastWave with Replay
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build signed APK with Replay
+    runs-on: ubuntu-latest
+    env:
+      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      RELEASE_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+      RELEASE_KEY_ALIAS: release_key
+      RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.KEY_STORE_PASSWORD }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Apply Replay patch
+        run: |
+          git apply --whitespace=nowarn replay.patch
+          git status --short
+
+      - name: Grant Gradle execute permission
+        run: chmod +x gradlew
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Stage APK
+        run: |
+          mkdir -p final_apk
+          cp app/build/outputs/apk/release/*.apk final_apk/
+          ls -lh final_apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: LastWave-with-Replay
+          path: final_apk/*
+          if-no-files-found: error
