@@ -1,0 +1,1156 @@
+diff --git a/app/src/main/java/com/lastwave/app/data/local/db/AppDatabase.kt b/app/src/main/java/com/lastwave/app/data/local/db/AppDatabase.kt
+index b15b701..6cab28a 100644
+--- a/app/src/main/java/com/lastwave/app/data/local/db/AppDatabase.kt
++++ b/app/src/main/java/com/lastwave/app/data/local/db/AppDatabase.kt
+@@ -14,8 +14,9 @@ import com.lastwave.app.data.podcast.PodcastProgressEntity
+         SongPlayStatsEntity::class,
+         RelatedGraphEdgeEntity::class,
+         PodcastProgressEntity::class,
++        PlayEventEntity::class,
+     ],
+-    version = 15,
++    version = 16,
+     exportSchema = false,
+ )
+ abstract class AppDatabase : RoomDatabase() {
+@@ -26,4 +27,5 @@ abstract class AppDatabase : RoomDatabase() {
+     abstract fun songPlayStatsDao(): SongPlayStatsDao
+     abstract fun relatedGraphDao(): RelatedGraphDao
+     abstract fun podcastProgressDao(): PodcastProgressDao
++    abstract fun playEventDao(): PlayEventDao
+ }
+diff --git a/app/src/main/java/com/lastwave/app/data/local/db/PlayEventEntity.kt b/app/src/main/java/com/lastwave/app/data/local/db/PlayEventEntity.kt
+new file mode 100644
+index 0000000..357ca1d
+--- /dev/null
++++ b/app/src/main/java/com/lastwave/app/data/local/db/PlayEventEntity.kt
+@@ -0,0 +1,144 @@
++package com.lastwave.app.data.local.db
++
++import androidx.room.Dao
++import androidx.room.Entity
++import androidx.room.Index
++import androidx.room.Insert
++import androidx.room.PrimaryKey
++import androidx.room.Query
++
++/**
++ * One counted play, with the date it happened. This is what makes dated
++ * stats (this week / month / year) possible; [SongPlayStatsEntity] only keeps
++ * running totals per track.
++ *
++ * [genres] holds the resolved tags for the track as a comma separated string
++ * ("indie pop, indie"), or "" when none could be resolved.
++ */
++@Entity(
++    tableName = "play_events",
++    indices = [Index("playedAtMillis"), Index("trackKey")],
++)
++data class PlayEventEntity(
++    @PrimaryKey(autoGenerate = true) val id: Long = 0L,
++    val trackKey: String,
++    val title: String,
++    val artist: String,
++    val album: String? = null,
++    val artworkUrl: String? = null,
++    val genres: String = "",
++    val playedAtMillis: Long,
++    val listenedMs: Long,
++)
++
++data class TrackAgg(
++    val trackKey: String,
++    val title: String,
++    val artist: String,
++    val artworkUrl: String?,
++    val plays: Int,
++    val totalMs: Long,
++)
++
++data class ArtistAgg(
++    val artist: String,
++    val artworkUrl: String?,
++    val plays: Int,
++    val totalMs: Long,
++)
++
++data class AlbumAgg(
++    val album: String,
++    val artist: String,
++    val artworkUrl: String?,
++    val plays: Int,
++    val totalMs: Long,
++)
++
++data class GenreRow(
++    val genres: String,
++    val listenedMs: Long,
++)
++
++@Dao
++interface PlayEventDao {
++    @Insert
++    suspend fun insert(event: PlayEventEntity)
++
++    @Query(
++        """
++        SELECT trackKey, title, artist, MAX(artworkUrl) AS artworkUrl,
++               COUNT(*) AS plays, SUM(listenedMs) AS totalMs
++        FROM play_events
++        WHERE playedAtMillis >= :from AND playedAtMillis < :to
++        GROUP BY trackKey
++        ORDER BY totalMs DESC, plays DESC
++        LIMIT :limit
++        """,
++    )
++    suspend fun topTracks(from: Long, to: Long, limit: Int): List<TrackAgg>
++
++    @Query(
++        """
++        SELECT artist, MAX(artworkUrl) AS artworkUrl,
++               COUNT(*) AS plays, SUM(listenedMs) AS totalMs
++        FROM play_events
++        WHERE playedAtMillis >= :from AND playedAtMillis < :to
++        GROUP BY artist
++        ORDER BY totalMs DESC, plays DESC
++        LIMIT :limit
++        """,
++    )
++    suspend fun topArtists(from: Long, to: Long, limit: Int): List<ArtistAgg>
++
++    @Query(
++        """
++        SELECT album, artist, MAX(artworkUrl) AS artworkUrl,
++               COUNT(*) AS plays, SUM(listenedMs) AS totalMs
++        FROM play_events
++        WHERE playedAtMillis >= :from AND playedAtMillis < :to
++          AND album IS NOT NULL AND album != ''
++        GROUP BY album, artist
++        ORDER BY totalMs DESC, plays DESC
++        LIMIT :limit
++        """,
++    )
++    suspend fun topAlbums(from: Long, to: Long, limit: Int): List<AlbumAgg>
++
++    @Query(
++        """
++        SELECT genres, listenedMs FROM play_events
++        WHERE playedAtMillis >= :from AND playedAtMillis < :to AND genres != ''
++        """,
++    )
++    suspend fun genreRows(from: Long, to: Long): List<GenreRow>
++
++    @Query("SELECT COUNT(*) FROM play_events WHERE playedAtMillis >= :from AND playedAtMillis < :to")
++    suspend fun totalPlays(from: Long, to: Long): Int
++
++    @Query("SELECT COALESCE(SUM(listenedMs), 0) FROM play_events WHERE playedAtMillis >= :from AND playedAtMillis < :to")
++    suspend fun totalListenedMs(from: Long, to: Long): Long
++
++    @Query("SELECT COUNT(DISTINCT trackKey) FROM play_events WHERE playedAtMillis >= :from AND playedAtMillis < :to")
++    suspend fun distinctSongs(from: Long, to: Long): Int
++
++    @Query("SELECT COUNT(DISTINCT artist) FROM play_events WHERE playedAtMillis >= :from AND playedAtMillis < :to")
++    suspend fun distinctArtists(from: Long, to: Long): Int
++
++    @Query(
++        """
++        SELECT COUNT(*) FROM (
++            SELECT DISTINCT album, artist FROM play_events
++            WHERE playedAtMillis >= :from AND playedAtMillis < :to
++              AND album IS NOT NULL AND album != ''
++        )
++        """,
++    )
++    suspend fun distinctAlbums(from: Long, to: Long): Int
++
++    @Query("SELECT MIN(playedAtMillis) FROM play_events")
++    suspend fun firstPlayedAt(): Long?
++
++    @Query("DELETE FROM play_events")
++    suspend fun clearAll()
++}
+diff --git a/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt b/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt
+new file mode 100644
+index 0000000..89e35ce
+--- /dev/null
++++ b/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt
+@@ -0,0 +1,180 @@
++package com.lastwave.app.data.repository
++
++import com.lastwave.app.data.genre.GenreResolver
++import com.lastwave.app.data.local.db.PlayEventDao
++import com.lastwave.app.data.local.db.PlayEventEntity
++import kotlinx.coroutines.withTimeoutOrNull
++import java.time.DayOfWeek
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
++import java.time.temporal.TemporalAdjusters
++import java.util.Locale
++import javax.inject.Inject
++import javax.inject.Singleton
++
++enum class ReplayPeriod(val tab: String, val caption: String) {
++    WEEK("Weekly", "This week"),
++    MONTH("Monthly", "This month"),
++    YEAR("Yearly", "This year"),
++    LIFETIME("Lifetime", "All time"),
++}
++
++data class ReplayRow(
++    val key: String,
++    val rank: Int,
++    val title: String,
++    val subtitle: String?,
++    val artworkUrl: String?,
++    val plays: Int,
++    val ms: Long,
++)
++
++data class ReplaySummary(
++    val totalMs: Long,
++    val totalPlays: Int,
++    val songs: List<ReplayRow>,
++    val artists: List<ReplayRow>,
++    val albums: List<ReplayRow>,
++    val genres: List<ReplayRow>,
++    val distinctSongs: Int,
++    val distinctArtists: Int,
++    val distinctAlbums: Int,
++    /** "MM/yy" of the first recorded play, or null if nothing is recorded yet. */
++    val memberSince: String?,
++) {
++    val isEmpty: Boolean get() = totalPlays == 0
++}
++
++/**
++ * Dated listening history for the Replay screen.
++ *
++ * Plays are recorded from [SongPlayStatsRepository.recordListenedMs], which
++ * MusicPlayer already calls whenever a track ends or is skipped. Nothing in
++ * the audio pipeline is touched.
++ */
++@Singleton
++class ReplayRepository @Inject constructor(
++    private val dao: PlayEventDao,
++    private val genreResolver: GenreResolver,
++) {
++    /**
++     * Saves one play if the track was heard long enough: half its length or
++     * 4 minutes, whichever is shorter, and never under 30 seconds (the same
++     * rule Last.fm uses for scrobbles).
++     */
++    suspend fun recordPlay(
++        title: String,
++        artist: String,
++        album: String?,
++        artworkUrl: String?,
++        listenedMs: Long,
++        durationMs: Long?,
++    ) {
++        if (title.isBlank() || artist.isBlank()) return
++        val needed = maxOf(
++            MIN_PLAY_MS,
++            if (durationMs != null && durationMs > 0L) minOf(durationMs / 2, MAX_PLAY_MS) else MIN_PLAY_MS,
++        )
++        if (listenedMs < needed) return
++
++        // Genre lookup uses the network (Last.fm / iTunes). Never let a slow
++        // lookup lose the play: give it a few seconds, then save without it.
++        val genres = withTimeoutOrNull(GENRE_TIMEOUT_MS) {
++            runCatching { genreResolver.resolve(title, artist) }.getOrDefault("")
++        }.orEmpty()
++
++        dao.insert(
++            PlayEventEntity(
++                trackKey = "${title.trim()}|${artist.trim()}".lowercase(),
++                title = title.trim(),
++                artist = artist.trim(),
++                album = album?.trim()?.takeIf { it.isNotEmpty() },
++                artworkUrl = artworkUrl,
++                genres = genres,
++                playedAtMillis = System.currentTimeMillis() - listenedMs,
++                listenedMs = listenedMs,
++            ),
++        )
++    }
++
++    suspend fun summary(period: ReplayPeriod): ReplaySummary {
++        val (from, to) = range(period)
++        val songs = dao.topTracks(from, to, CHART_LENGTH).mapIndexed { i, t ->
++            ReplayRow(t.trackKey, i + 1, t.title, t.artist, t.artworkUrl, t.plays, t.totalMs)
++        }
++        val artists = dao.topArtists(from, to, CHART_LENGTH).mapIndexed { i, a ->
++            ReplayRow(a.artist.lowercase(), i + 1, a.artist, null, a.artworkUrl, a.plays, a.totalMs)
++        }
++        val albums = dao.topAlbums(from, to, CHART_LENGTH).mapIndexed { i, a ->
++            ReplayRow("${a.album}|${a.artist}".lowercase(), i + 1, a.album, a.artist, a.artworkUrl, a.plays, a.totalMs)
++        }
++        val genres = buildGenreRows(from, to)
++        val first = dao.firstPlayedAt()
++        return ReplaySummary(
++            totalMs = dao.totalListenedMs(from, to),
++            totalPlays = dao.totalPlays(from, to),
++            songs = songs,
++            artists = artists,
++            albums = albums,
++            genres = genres,
++            distinctSongs = dao.distinctSongs(from, to),
++            distinctArtists = dao.distinctArtists(from, to),
++            distinctAlbums = dao.distinctAlbums(from, to),
++            memberSince = first?.let { memberSinceLabel(it) },
++        )
++    }
++
++    private suspend fun buildGenreRows(from: Long, to: Long): List<ReplayRow> {
++        val ms = HashMap<String, Long>()
++        val plays = HashMap<String, Int>()
++        for (row in dao.genreRows(from, to)) {
++            row.genres.split(',')
++                .map { it.trim() }
++                .filter { it.isNotEmpty() }
++                .distinct()
++                .forEach { tag ->
++                    val name = displayGenre(tag)
++                    ms[name] = (ms[name] ?: 0L) + row.listenedMs
++                    plays[name] = (plays[name] ?: 0) + 1
++                }
++        }
++        return ms.entries
++            .sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
++            .take(CHART_LENGTH)
++            .mapIndexed { i, e ->
++                ReplayRow(e.key.lowercase(), i + 1, e.key, null, null, plays[e.key] ?: 0, e.value)
++            }
++    }
++
++    private fun displayGenre(tag: String): String =
++        tag.split(' ').filter { it.isNotEmpty() }.joinToString(" ") { word ->
++            word.replaceFirstChar { c -> if (c.isLowerCase()) c.titlecase(Locale.getDefault()) else c.toString() }
++        }
++
++    /** Start (inclusive) and end (exclusive) of the period, in epoch millis. */
++    private fun range(period: ReplayPeriod): Pair<Long, Long> {
++        val zone = ZoneId.systemDefault()
++        val today = LocalDate.now(zone)
++        val start: LocalDate? = when (period) {
++            ReplayPeriod.WEEK -> today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
++            ReplayPeriod.MONTH -> today.withDayOfMonth(1)
++            ReplayPeriod.YEAR -> today.withDayOfYear(1)
++            ReplayPeriod.LIFETIME -> null
++        }
++        val from = start?.atStartOfDay(zone)?.toInstant()?.toEpochMilli() ?: 0L
++        return from to Long.MAX_VALUE
++    }
++
++    private fun memberSinceLabel(firstPlayedAt: Long): String =
++        java.time.Instant.ofEpochMilli(firstPlayedAt)
++            .atZone(ZoneId.systemDefault())
++            .format(DateTimeFormatter.ofPattern("MM/yy"))
++
++    private companion object {
++        const val MIN_PLAY_MS = 30_000L
++        const val MAX_PLAY_MS = 240_000L
++        const val GENRE_TIMEOUT_MS = 8_000L
++        const val CHART_LENGTH = 5
++    }
++}
+diff --git a/app/src/main/java/com/lastwave/app/data/repository/SongPlayStatsRepository.kt b/app/src/main/java/com/lastwave/app/data/repository/SongPlayStatsRepository.kt
+index 42650b8..3153661 100644
+--- a/app/src/main/java/com/lastwave/app/data/repository/SongPlayStatsRepository.kt
++++ b/app/src/main/java/com/lastwave/app/data/repository/SongPlayStatsRepository.kt
+@@ -17,6 +17,7 @@ private fun trackKeyOf(title: String, artist: String) = "${title.trim()}|${artis
+ @Singleton
+ class SongPlayStatsRepository @Inject constructor(
+     private val dao: SongPlayStatsDao,
++    private val replayRepository: ReplayRepository,
+ ) {
+     suspend fun recordListenedMs(
+         title: String,
+@@ -25,6 +26,8 @@ class SongPlayStatsRepository @Inject constructor(
+         artworkUrl: String?,
+         listenedMs: Long,
+         completed: Boolean,
++        album: String? = null,
++        durationMs: Long? = null,
+     ) {
+         if (title.isBlank() || artist.isBlank() || listenedMs <= 0L) return
+         if (artist.equals("Podcast", ignoreCase = true)) return
+@@ -39,6 +42,11 @@ class SongPlayStatsRepository @Inject constructor(
+                 lastPlayedAtMillis = System.currentTimeMillis(),
+             ),
+         )
++        // Dated copy for the Replay screen. Failures here must never affect
++        // the existing taste stats or playback.
++        runCatching {
++            replayRepository.recordPlay(title, artist, album, artworkUrl, listenedMs, durationMs)
++        }
+     }
+ 
+     suspend fun recordSkip(title: String, artist: String, videoId: String?) {
+diff --git a/app/src/main/java/com/lastwave/app/di/DatabaseModule.kt b/app/src/main/java/com/lastwave/app/di/DatabaseModule.kt
+index ccdf04d..a609790 100644
+--- a/app/src/main/java/com/lastwave/app/di/DatabaseModule.kt
++++ b/app/src/main/java/com/lastwave/app/di/DatabaseModule.kt
+@@ -314,6 +314,32 @@ object DatabaseModule {
+         }
+     }
+ 
++    private val migration15To16 = object : Migration(15, 16) {
++        override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
++            database.execSQL(
++                """
++                CREATE TABLE IF NOT EXISTS `play_events` (
++                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
++                    `trackKey` TEXT NOT NULL,
++                    `title` TEXT NOT NULL,
++                    `artist` TEXT NOT NULL,
++                    `album` TEXT,
++                    `artworkUrl` TEXT,
++                    `genres` TEXT NOT NULL,
++                    `playedAtMillis` INTEGER NOT NULL,
++                    `listenedMs` INTEGER NOT NULL
++                )
++                """.trimIndent(),
++            )
++            database.execSQL(
++                "CREATE INDEX IF NOT EXISTS `index_play_events_playedAtMillis` ON `play_events` (`playedAtMillis`)",
++            )
++            database.execSQL(
++                "CREATE INDEX IF NOT EXISTS `index_play_events_trackKey` ON `play_events` (`trackKey`)",
++            )
++        }
++    }
++
+     @Provides
+     @Singleton
+     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
+@@ -335,6 +361,7 @@ object DatabaseModule {
+                 migration12To13,
+                 migration13To14,
+                 migration14To15,
++                migration15To16,
+             )
+             .build()
+ 
+@@ -370,4 +397,9 @@ object DatabaseModule {
+     @Singleton
+     fun providePodcastProgressDao(database: AppDatabase): PodcastProgressDao =
+         database.podcastProgressDao()
++
++    @Provides
++    @Singleton
++    fun providePlayEventDao(database: AppDatabase): com.lastwave.app.data.local.db.PlayEventDao =
++        database.playEventDao()
+ }
+diff --git a/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt b/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
+index 1956bc4..bd59cba 100644
+--- a/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
++++ b/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
+@@ -752,6 +752,8 @@ class MusicPlayer @Inject constructor(
+                 artworkUrl = previousTrack.artworkUrl,
+                 listenedMs = previousPositionMs,
+                 completed = completedNaturally,
++                album = previousTrack.album,
++                durationMs = previousDurationMs.takeIf { it > 0L } ?: previousTrack.durationMs,
+             )
+             if (wasSkip) {
+                 repo.recordSkip(previousTrack.title, previousTrack.artist, previousTrack.videoId)
+diff --git a/app/src/main/java/com/lastwave/app/ui/home/HomeScreen.kt b/app/src/main/java/com/lastwave/app/ui/home/HomeScreen.kt
+index 1d04e47..b9ca71f 100644
+--- a/app/src/main/java/com/lastwave/app/ui/home/HomeScreen.kt
++++ b/app/src/main/java/com/lastwave/app/ui/home/HomeScreen.kt
+@@ -170,6 +170,7 @@ fun HomeScreen(
+     onOpenSearch: () -> Unit,
+     onOpenDiscover: () -> Unit,
+     onOpenGenres: () -> Unit,
++    onOpenReplay: () -> Unit = {},
+     onOpenFriends: () -> Unit,
+     onOpenDownloads: () -> Unit = {},
+     viewModel: HomeViewModel = hiltViewModel(),
+@@ -258,6 +259,33 @@ fun HomeScreen(
+                 Spacer(Modifier.height(12.dp))
+             }
+ 
++            if (!uiState.isViewingFriend) {
++                Surface(
++                    shape = RoundedCornerShape(20.dp),
++                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
++                    modifier = Modifier
++                        .padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
++                        .fillMaxWidth()
++                        .clip(RoundedCornerShape(20.dp))
++                        .clickable(onClick = onOpenReplay),
++                ) {
++                    Row(
++                        Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
++                        verticalAlignment = Alignment.CenterVertically,
++                    ) {
++                        Text(
++                            "Replay",
++                            style = MaterialTheme.typography.titleMedium,
++                            fontWeight = FontWeight.Bold,
++                            modifier = Modifier.weight(1f),
++                        )
++                        Icon(
++                            Icons.AutoMirrored.Filled.ArrowForward,
++                            contentDescription = null,
++                        )
++                    }
++                }
++            }
+ 
+             PullToRefreshBox(
+                 isRefreshing = uiState.isRefreshing,
+diff --git a/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt b/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
+index 7c5de49..fd73a4a 100644
+--- a/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
++++ b/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
+@@ -261,6 +261,7 @@ fun LastWaveNavHost(
+                 onOpenSearch = { navController.navigate(Screen.Search.route) },
+                 onOpenDiscover = { navController.navigate(Screen.Discover.route) },
+                 onOpenGenres = { navController.navigate(Screen.Genres.route) },
++                onOpenReplay = { navController.navigate(Screen.Replay.route) },
+                 onOpenFriends = { navController.navigate(Screen.Friends.route) },
+                 onOpenFriendProfile = { username, displayName, avatarUrl ->
+                     navController.navigate(Screen.FriendProfile.createRoute(username, displayName, avatarUrl))
+@@ -386,6 +387,13 @@ fun LastWaveNavHost(
+         // onBack (its toolbar back button) still pops directly; the wrap
+         // only adds the gesture-driven path, it doesn't replace the
+         // button's.
++        composable(Screen.Replay.route) {
++            PredictiveBackScreen(onBack = { navController.popBackStack() }) {
++                com.lastwave.app.ui.replay.ReplayScreen(
++                    onBack = { navController.popBackStack() },
++                )
++            }
++        }
+         composable(Screen.Genres.route) {
+             PredictiveBackScreen(onBack = { navController.popBackStack() }) {
+                 GenresScreen(
+diff --git a/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt b/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt
+index 22659a6..df8deea 100644
+--- a/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt
++++ b/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt
+@@ -19,6 +19,7 @@ sealed class Screen(val route: String) {
+     // Pushed screens, slide-in from the right (matches PAGE_TRANSITIONS in nav.js)
+     data object Discover : Screen("discover")
+     data object Genres : Screen("genres")
++    data object Replay : Screen("replay")
+     data object Search : Screen("search")
+     data object Settings : Screen("settings")
+     data object Friends : Screen("friends")
+diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt
+new file mode 100644
+index 0000000..cd1f854
+--- /dev/null
++++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt
+@@ -0,0 +1,528 @@
++package com.lastwave.app.ui.replay
++
++import android.content.Intent
++import androidx.compose.animation.animateColorAsState
++import androidx.compose.animation.core.tween
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.WindowInsets
++import androidx.compose.foundation.layout.aspectRatio
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.statusBars
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.layout.windowInsetsPadding
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.lazy.LazyRow
++import androidx.compose.foundation.lazy.items
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.automirrored.filled.ArrowBack
++import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
++import androidx.compose.material.icons.filled.Share
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.Icon
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.layout.ContentScale
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.style.TextAlign
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.hilt.navigation.compose.hiltViewModel
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
++import coil.compose.AsyncImage
++import com.lastwave.app.data.repository.ReplayPeriod
++import com.lastwave.app.data.repository.ReplayRow
++import com.lastwave.app.data.repository.ReplaySummary
++import com.lastwave.app.ui.common.safeDrawingBottomPadding
++import com.lastwave.app.ui.player.LocalMiniPlayerScrollClearance
++import kotlin.math.max
++import kotlin.math.roundToLong
++
++private val ReplayRed = Color(0xFFFF2D55)
++private const val HOLDER = "LASTWAVE LISTENER"
++private const val GUTTER = 24
++
++/**
++ * Replay: dated listening stats (top songs, artists, albums, genres) for the
++ * week, month, year or all time. Laid out after BitChord's Replay page.
++ */
++@Composable
++fun ReplayScreen(
++    onBack: () -> Unit,
++    viewModel: ReplayViewModel = hiltViewModel(),
++) {
++    val state by viewModel.state.collectAsStateWithLifecycle()
++    val summary = state.summary
++    val context = LocalContext.current
++
++    Box(
++        Modifier
++            .fillMaxSize()
++            .background(
++                Brush.verticalGradient(
++                    listOf(Color(0xFF2B2236), Color(0xFF15111B), Color(0xFF050407)),
++                ),
++            ),
++    ) {
++        LazyColumn(
++            modifier = Modifier.fillMaxSize(),
++            contentPadding = PaddingValues(
++                bottom = LocalMiniPlayerScrollClearance.current + safeDrawingBottomPadding() + 24.dp,
++            ),
++        ) {
++            item(key = "top") {
++                Column(Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
++                    Spacer(Modifier.height(12.dp))
++                    Box(
++                        Modifier
++                            .padding(start = 16.dp)
++                            .size(48.dp)
++                            .clip(CircleShape)
++                            .background(Color.White.copy(alpha = 0.10f))
++                            .clickable(onClick = onBack),
++                        contentAlignment = Alignment.Center,
++                    ) {
++                        Icon(
++                            Icons.AutoMirrored.Filled.ArrowBack,
++                            contentDescription = "Back",
++                            tint = Color.White,
++                        )
++                    }
++                    Spacer(Modifier.height(56.dp))
++                    Column(Modifier.padding(horizontal = GUTTER.dp)) {
++                        Text(
++                            "Replay",
++                            color = Color.White,
++                            fontSize = 44.sp,
++                            fontWeight = FontWeight.ExtraBold,
++                        )
++                        Text(
++                            state.period.caption,
++                            color = Color.White.copy(alpha = 0.6f),
++                            fontSize = 18.sp,
++                        )
++                        Spacer(Modifier.height(14.dp))
++                        PeriodPicker(state.period, viewModel::setPeriod)
++                        Spacer(Modifier.height(18.dp))
++                    }
++                }
++            }
++
++            when {
++                state.loading && summary == null -> item(key = "loading") {
++                    Box(Modifier.fillMaxWidth().padding(64.dp), Alignment.Center) {
++                        CircularProgressIndicator(color = Color.White.copy(alpha = 0.6f))
++                    }
++                }
++                summary == null || summary.isEmpty -> item(key = "empty") { EmptyReplay() }
++                else -> {
++                    item(key = "cards") { CardRow(summary, state.period) }
++                    item(key = "songs-title") { SectionTitle("Top songs") }
++                    items(summary.songs, key = { "song-${it.key}" }) { ChartRow(it, circular = false) }
++                    item(key = "artists-title") { SectionTitle("Top artists") }
++                    items(summary.artists, key = { "artist-${it.key}" }) { ChartRow(it, circular = true) }
++                    item(key = "albums-title") { SectionTitle("Top albums") }
++                    items(summary.albums, key = { "album-${it.key}" }) { ChartRow(it, circular = false) }
++                    if (summary.genres.isNotEmpty()) {
++                        item(key = "genres-title") { SectionTitle("Top genres") }
++                        items(summary.genres, key = { "genre-${it.key}" }) { GenreRow(it) }
++                    }
++                    item(key = "habits") { Habits(summary) }
++                    item(key = "share") {
++                        ActionRow(Icons.Filled.Share, "Share my Replay") {
++                            val send = Intent(Intent.ACTION_SEND).apply {
++                                type = "text/plain"
++                                putExtra(Intent.EXTRA_TEXT, shareText(summary, state.period))
++                            }
++                            context.startActivity(Intent.createChooser(send, "Share my Replay"))
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++// ── Header ──────────────────────────────────────────────────────────────────
++
++@Composable
++private fun PeriodPicker(selected: ReplayPeriod, onSelect: (ReplayPeriod) -> Unit) {
++    Row(
++        Modifier
++            .fillMaxWidth()
++            .clip(RoundedCornerShape(14.dp))
++            .background(Color.White.copy(alpha = 0.10f))
++            .padding(3.dp),
++        horizontalArrangement = Arrangement.spacedBy(2.dp),
++    ) {
++        ReplayPeriod.entries.forEach { period ->
++            val active = period == selected
++            val background by animateColorAsState(
++                if (active) Color.White.copy(alpha = 0.94f) else Color.Transparent,
++                tween(160),
++                label = "periodChip",
++            )
++            Text(
++                text = period.tab,
++                color = if (active) Color.Black else Color.White.copy(alpha = 0.75f),
++                fontSize = 14.sp,
++                fontWeight = FontWeight.Bold,
++                textAlign = TextAlign.Center,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis,
++                modifier = Modifier
++                    .weight(1f)
++                    .clip(RoundedCornerShape(11.dp))
++                    .background(background)
++                    .clickable { onSelect(period) }
++                    .padding(horizontal = 6.dp, vertical = 9.dp),
++            )
++        }
++    }
++}
++
++// ── Cards ───────────────────────────────────────────────────────────────────
++
++private data class HeroCard(val label: String, val value: String, val unit: String, val detail: String)
++
++@Composable
++private fun CardRow(summary: ReplaySummary, period: ReplayPeriod) {
++    val minutes = max(1L, (summary.totalMs / 60_000.0).roundToLong())
++    val plays = if (summary.totalPlays == 1) "1 Play" else "${summary.totalPlays} Plays"
++    val cards = buildList {
++        add(HeroCard("YOUR LISTENING EXPERIENCE", minutes.toString(), "MINUTES LISTENED", "$plays · ${period.caption}"))
++        summary.songs.firstOrNull()?.let {
++            add(HeroCard("YOUR TOP SONG", it.title, "TOP SONG", it.subtitle ?: period.caption))
++        }
++        summary.artists.firstOrNull()?.let {
++            add(HeroCard("YOUR TOP ARTIST", it.title, "TOP ARTIST", period.caption))
++        }
++        summary.albums.firstOrNull()?.let {
++            add(HeroCard("YOUR TOP ALBUM", it.title, "TOP ALBUM", it.subtitle ?: period.caption))
++        }
++    }
++    LazyRow(
++        contentPadding = PaddingValues(horizontal = GUTTER.dp),
++        horizontalArrangement = Arrangement.spacedBy(12.dp),
++    ) {
++        items(cards, key = { it.label }) { card ->
++            CreditCard(card, summary.memberSince, Modifier.width(300.dp))
++        }
++    }
++    Spacer(Modifier.height(16.dp))
++}
++
++@Composable
++private fun CreditCard(card: HeroCard, memberSince: String?, modifier: Modifier = Modifier) {
++    val shape = RoundedCornerShape(24.dp)
++    Box(
++        modifier
++            .aspectRatio(1.586f)
++            .clip(shape)
++            .background(
++                Brush.linearGradient(listOf(Color(0xFF3B3345), Color(0xFF211B29), Color(0xFF17121D))),
++            ),
++    ) {
++        Column(Modifier.fillMaxSize().padding(20.dp)) {
++            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
++                Text(
++                    card.label,
++                    color = Color.White.copy(alpha = 0.7f),
++                    fontSize = 12.sp,
++                    fontWeight = FontWeight.Bold,
++                    letterSpacing = 2.sp,
++                    modifier = Modifier.weight(1f),
++                )
++                Text("≋", color = Color.White, fontSize = 30.sp)
++            }
++            Spacer(Modifier.weight(1f))
++            Text(
++                card.value,
++                color = Color.White,
++                fontSize = if (card.value.length > 10) 24.sp else 40.sp,
++                fontWeight = FontWeight.ExtraBold,
++                maxLines = 2,
++                overflow = TextOverflow.Ellipsis,
++            )
++            Text(
++                card.unit,
++                color = Color.White.copy(alpha = 0.75f),
++                fontFamily = FontFamily.Monospace,
++                fontWeight = FontWeight.Bold,
++                fontSize = 13.sp,
++                letterSpacing = 2.sp,
++            )
++            Spacer(Modifier.height(18.dp))
++            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
++                Column(Modifier.weight(1f)) {
++                    Text(
++                        HOLDER,
++                        color = Color.White.copy(alpha = 0.9f),
++                        fontFamily = FontFamily.Monospace,
++                        fontWeight = FontWeight.Bold,
++                        fontSize = 15.sp,
++                        letterSpacing = 2.sp,
++                        maxLines = 1,
++                    )
++                    Text(
++                        card.detail,
++                        color = Color.White.copy(alpha = 0.55f),
++                        fontSize = 12.sp,
++                        maxLines = 1,
++                        overflow = TextOverflow.Ellipsis,
++                    )
++                }
++                if (memberSince != null) {
++                    Column(horizontalAlignment = Alignment.End) {
++                        Text(
++                            "MEMBER SINCE",
++                            color = Color.White.copy(alpha = 0.55f),
++                            fontSize = 8.sp,
++                            letterSpacing = 1.sp,
++                        )
++                        Text(
++                            memberSince.replace("/", " / "),
++                            color = Color.White,
++                            fontFamily = FontFamily.Monospace,
++                            fontWeight = FontWeight.Bold,
++                            fontSize = 18.sp,
++                            letterSpacing = 2.sp,
++                        )
++                    }
++                }
++            }
++        }
++    }
++}
++
++// ── Charts ──────────────────────────────────────────────────────────────────
++
++@Composable
++private fun SectionTitle(text: String) {
++    Text(
++        text,
++        color = Color.White,
++        fontSize = 28.sp,
++        fontWeight = FontWeight.ExtraBold,
++        modifier = Modifier.padding(start = GUTTER.dp, end = GUTTER.dp, top = 22.dp, bottom = 10.dp),
++    )
++}
++
++@Composable
++private fun ChartRow(row: ReplayRow, circular: Boolean) {
++    val shape = if (circular) CircleShape else RoundedCornerShape(6.dp)
++    Row(
++        Modifier.fillMaxWidth().padding(horizontal = GUTTER.dp, vertical = 7.dp),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        RankBadge(row.rank)
++        if (row.artworkUrl != null) {
++            AsyncImage(
++                model = row.artworkUrl,
++                contentDescription = null,
++                contentScale = ContentScale.Crop,
++                modifier = Modifier.size(56.dp).clip(shape),
++            )
++        } else {
++            InitialTile(row.title, Color.White.copy(alpha = 0.14f), shape)
++        }
++        Spacer(Modifier.width(14.dp))
++        RowText(row)
++    }
++}
++
++@Composable
++private fun GenreRow(row: ReplayRow) {
++    Row(
++        Modifier.fillMaxWidth().padding(horizontal = GUTTER.dp, vertical = 7.dp),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        RankBadge(row.rank)
++        InitialTile(row.title, genreColor(row.title), RoundedCornerShape(6.dp))
++        Spacer(Modifier.width(14.dp))
++        RowText(row)
++    }
++}
++
++@Composable
++private fun androidx.compose.foundation.layout.RowScope.RowText(row: ReplayRow) {
++    Column(Modifier.weight(1f)) {
++        Text(
++            row.title,
++            color = Color.White,
++            fontSize = 17.sp,
++            fontWeight = FontWeight.SemiBold,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis,
++        )
++        Text(
++            listOfNotNull(row.subtitle, formatMinutes(row.ms)).joinToString(" · "),
++            color = Color.White.copy(alpha = 0.55f),
++            fontSize = 14.sp,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis,
++        )
++    }
++    if (row.plays > 0) {
++        Text(row.plays.toString(), color = Color.White.copy(alpha = 0.45f), fontSize = 14.sp)
++    }
++}
++
++@Composable
++private fun RankBadge(rank: Int) {
++    Text(
++        rank.toString(),
++        color = if (rank == 1) ReplayRed else Color.White.copy(alpha = 0.5f),
++        fontSize = 20.sp,
++        fontWeight = FontWeight.Bold,
++        textAlign = TextAlign.Center,
++        modifier = Modifier.width(34.dp),
++    )
++}
++
++@Composable
++private fun InitialTile(title: String, color: Color, shape: androidx.compose.ui.graphics.Shape) {
++    Box(
++        Modifier.size(56.dp).clip(shape).background(color),
++        contentAlignment = Alignment.Center,
++    ) {
++        Text(
++            title.firstOrNull()?.uppercase() ?: "?",
++            color = Color.White,
++            fontSize = 22.sp,
++            fontWeight = FontWeight.Bold,
++        )
++    }
++}
++
++private fun genreColor(name: String): Color {
++    val palette = listOf(
++        Color(0xFF2E9E87), Color(0xFF3563C9), Color(0xFF3FA65A),
++        Color(0xFF8A4FC4), Color(0xFFC9703A), Color(0xFFC94F7A),
++    )
++    return palette[(name.hashCode() and Int.MAX_VALUE) % palette.size]
++}
++
++// ── Tail ────────────────────────────────────────────────────────────────────
++
++@Composable
++private fun Habits(summary: ReplaySummary) {
++    Column(Modifier.padding(horizontal = GUTTER.dp)) {
++        Text(
++            "Your listening pattern",
++            color = Color.White,
++            fontSize = 28.sp,
++            fontWeight = FontWeight.ExtraBold,
++            modifier = Modifier.padding(top = 22.dp, bottom = 12.dp),
++        )
++        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
++            StatTile("Songs", summary.distinctSongs, Modifier.weight(1f))
++            StatTile("Artists", summary.distinctArtists, Modifier.weight(1f))
++            StatTile("Albums", summary.distinctAlbums, Modifier.weight(1f))
++        }
++    }
++}
++
++@Composable
++private fun StatTile(label: String, value: Int, modifier: Modifier = Modifier) {
++    Column(
++        modifier
++            .clip(RoundedCornerShape(16.dp))
++            .background(Color.White.copy(alpha = 0.09f))
++            .padding(vertical = 18.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++    ) {
++        Text(value.toString(), color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
++        Text(label, color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, letterSpacing = 1.sp)
++    }
++}
++
++@Composable
++private fun ActionRow(icon: ImageVector, label: String, onClick: () -> Unit) {
++    Row(
++        Modifier
++            .padding(horizontal = GUTTER.dp, vertical = 22.dp)
++            .fillMaxWidth()
++            .clip(RoundedCornerShape(16.dp))
++            .background(Color.White.copy(alpha = 0.12f))
++            .clickable(onClick = onClick)
++            .padding(horizontal = 18.dp, vertical = 16.dp),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
++        Spacer(Modifier.width(14.dp))
++        Text(label, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
++        Icon(
++            Icons.AutoMirrored.Filled.KeyboardArrowRight,
++            contentDescription = null,
++            tint = Color.White.copy(alpha = 0.5f),
++            modifier = Modifier.size(20.dp),
++        )
++    }
++}
++
++@Composable
++private fun EmptyReplay() {
++    Column(
++        Modifier.fillMaxWidth().padding(horizontal = 36.dp, vertical = 56.dp),
++        horizontalAlignment = Alignment.CenterHorizontally,
++    ) {
++        Text(
++            "Not enough listening yet",
++            color = Color.White,
++            fontSize = 22.sp,
++            fontWeight = FontWeight.Bold,
++            textAlign = TextAlign.Center,
++        )
++        Spacer(Modifier.height(8.dp))
++        Text(
++            "Play some songs and your Replay for this period will show up here.",
++            color = Color.White.copy(alpha = 0.6f),
++            fontSize = 15.sp,
++            textAlign = TextAlign.Center,
++        )
++    }
++}
++
++// ── Formatting ──────────────────────────────────────────────────────────────
++
++private fun formatMinutes(ms: Long): String {
++    val minutes = max(1L, (ms / 60_000.0).roundToLong())
++    return if (minutes >= 60) {
++        val h = minutes / 60
++        val m = minutes % 60
++        if (m == 0L) "$h hr" else "$h hr $m min"
++    } else {
++        "$minutes min"
++    }
++}
++
++private fun shareText(summary: ReplaySummary, period: ReplayPeriod): String = buildString {
++    val minutes = max(1L, (summary.totalMs / 60_000.0).roundToLong())
++    append("My LastWave Replay (${period.caption.lowercase()}): $minutes minutes, ${summary.totalPlays} plays.")
++    summary.songs.firstOrNull()?.let { append("\nTop song: ${it.title}${it.subtitle?.let { a -> " – $a" } ?: ""}") }
++    summary.artists.firstOrNull()?.let { append("\nTop artist: ${it.title}") }
++    summary.albums.firstOrNull()?.let { append("\nTop album: ${it.title}") }
++}
+diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayViewModel.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayViewModel.kt
+new file mode 100644
+index 0000000..462061a
+--- /dev/null
++++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayViewModel.kt
+@@ -0,0 +1,54 @@
++package com.lastwave.app.ui.replay
++
++import androidx.lifecycle.ViewModel
++import androidx.lifecycle.viewModelScope
++import com.lastwave.app.data.repository.ReplayPeriod
++import com.lastwave.app.data.repository.ReplayRepository
++import com.lastwave.app.data.repository.ReplaySummary
++import dagger.hilt.android.lifecycle.HiltViewModel
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.flow.update
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import javax.inject.Inject
++
++data class ReplayUiState(
++    val period: ReplayPeriod = ReplayPeriod.WEEK,
++    val loading: Boolean = true,
++    val summary: ReplaySummary? = null,
++)
++
++@HiltViewModel
++class ReplayViewModel @Inject constructor(
++    private val repository: ReplayRepository,
++) : ViewModel() {
++
++    private val _state = MutableStateFlow(ReplayUiState())
++    val state: StateFlow<ReplayUiState> = _state.asStateFlow()
++
++    private var job: Job? = null
++
++    init {
++        load(ReplayPeriod.WEEK)
++    }
++
++    fun setPeriod(period: ReplayPeriod) {
++        if (period == _state.value.period && _state.value.summary != null) return
++        load(period)
++    }
++
++    private fun load(period: ReplayPeriod) {
++        _state.update { it.copy(period = period, loading = true) }
++        job?.cancel()
++        job = viewModelScope.launch {
++            val summary = runCatching {
++                withContext(Dispatchers.IO) { repository.summary(period) }
++            }.getOrNull()
++            _state.update { it.copy(loading = false, summary = summary) }
++        }
++    }
++}
+diff --git a/app/src/main/java/com/lastwave/app/ui/shell/MainShell.kt b/app/src/main/java/com/lastwave/app/ui/shell/MainShell.kt
+index 1ff4995..220031f 100644
+--- a/app/src/main/java/com/lastwave/app/ui/shell/MainShell.kt
++++ b/app/src/main/java/com/lastwave/app/ui/shell/MainShell.kt
+@@ -221,6 +221,7 @@ fun MainShell(
+     onOpenSearch: () -> Unit,
+     onOpenDiscover: () -> Unit,
+     onOpenGenres: () -> Unit,
++    onOpenReplay: () -> Unit = {},
+     onOpenFriends: () -> Unit,
+     onOpenFriendProfile: (username: String, displayName: String?, avatarUrl: String?) -> Unit = { _, _, _ -> },
+     onOpenFeedPlaylist: (String) -> Unit,
+@@ -374,6 +375,7 @@ fun MainShell(
+                         onOpenSearch = onOpenSearch,
+                         onOpenDiscover = onOpenDiscover,
+                         onOpenGenres = onOpenGenres,
++                        onOpenReplay = onOpenReplay,
+                         onOpenFriends = onOpenFriends,
+                         onOpenDownloads = onOpenDownloads,
+                     )
