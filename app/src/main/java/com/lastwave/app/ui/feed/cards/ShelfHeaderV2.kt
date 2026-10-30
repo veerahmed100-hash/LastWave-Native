@@ -5,6 +5,8 @@
 package com.lastwave.app.ui.feed.cards
 
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
@@ -37,13 +40,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lastwave.app.R
+import com.lastwave.app.ui.common.ExpressiveShuffleButton
 
 /**
  * Native shelf header, matching FeedSectionHeader's liquid-glass pill style but
  * adding an optional uppercase eyebrow (YTM strapline), an optional one-line
  * subtitle, and an optional "more" chevron (only when the shelf actually has a
- * supported destination). Play all + shuffle pills appear for playable shelves.
+ * supported destination). Shuffle button appears for playable shelves.
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ShelfHeaderV2(
     title: String,
@@ -51,8 +56,8 @@ fun ShelfHeaderV2(
     subtitle: String? = null,
     showMore: Boolean = false,
     onMoreClick: (() -> Unit)? = null,
-    onPlayAll: (() -> Unit)? = null,
     onShuffle: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val haptics = LocalHapticFeedback.current
     Row(
@@ -65,10 +70,16 @@ fun ShelfHeaderV2(
         Column(
             modifier = Modifier
                 .weight(1f)
-                .then(
-                    if (showMore && onMoreClick != null) {
-                        Modifier.cardPressable(onClick = onMoreClick)
-                    } else Modifier
+                .combinedClickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null,
+                    onClick = { if (showMore && onMoreClick != null) onMoreClick() },
+                    onLongClick = onLongClick?.let {
+                        {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            it()
+                        }
+                    },
                 ),
         ) {
             if (!eyebrow.isNullOrBlank()) {
@@ -111,53 +122,10 @@ fun ShelfHeaderV2(
         }
 
         if (onShuffle != null) {
-            Surface(
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onShuffle()
-                },
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
-            ) {
-                Box(modifier = Modifier.padding(8.dp), contentAlignment = Alignment.Center) {
-                    Icon(
-                        Icons.Filled.Shuffle,
-                        contentDescription = stringResource(R.string.feed_shuffle_title_cd, title),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
-        }
-
-        if (onPlayAll != null) {
-            Surface(
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onPlayAll()
-                },
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Icon(
-                        Icons.Filled.PlayCircle,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(15.dp),
-                    )
-                    Text(
-                        stringResource(R.string.feed_play_all),
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-            }
+            ExpressiveShuffleButton(
+                onClick = onShuffle,
+                contentDescription = stringResource(R.string.feed_shuffle_title_cd, title),
+            )
         }
 
         if (showMore && onMoreClick != null) {

@@ -76,9 +76,11 @@ internal object WidgetViews {
         appWidgetId: Int,
         eqFrame: Int? = null,
         progressOverride: Float? = null,
+        memoryArt: Bitmap? = null,
     ): RemoteViews {
         val resolved = resolve(context)
-        val artBitmap = resolveArtBitmap(resolved.snapshot.artPath)
+        val artBitmap = memoryArt?.let { if (!it.isRecycled) roundedCorners(it, 0.22f) else null }
+            ?: resolveArtBitmap(resolved.snapshot.artPath)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val sizeMap = mapOf(
@@ -205,6 +207,53 @@ internal object WidgetViews {
             views.setInt(R.id.widget_next, "setColorFilter", tint)
         }
 
+        // Dynamic color extraction per song from album art
+        if (artBitmap != null && !artBitmap.isRecycled) {
+            runCatching {
+                val palette = androidx.palette.graphics.Palette.from(artBitmap).maximumColorCount(16).generate()
+                val swatch = palette.vibrantSwatch
+                    ?: palette.dominantSwatch
+                    ?: palette.mutedSwatch
+                if (swatch != null) {
+                    val primaryColor = swatch.rgb
+                    val onPrimaryColor = swatch.titleTextColor
+
+                    views.setTextColor(R.id.widget_state, onPrimaryColor)
+                    views.setInt(R.id.widget_play_pause, "setColorFilter", onPrimaryColor)
+                    views.setInt(R.id.widget_next, "setColorFilter", onPrimaryColor)
+                    views.setInt(R.id.widget_prev, "setColorFilter", primaryColor)
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        views.setColorStateList(
+                            R.id.widget_play_pause_container,
+                            "setBackgroundTintList",
+                            android.content.res.ColorStateList.valueOf(primaryColor),
+                        )
+                        views.setColorStateList(
+                            R.id.widget_next_container,
+                            "setBackgroundTintList",
+                            android.content.res.ColorStateList.valueOf(primaryColor),
+                        )
+                        val bgTint = androidx.core.graphics.ColorUtils.blendARGB(
+                            ContextCompat.getColor(context, R.color.widget_surface),
+                            primaryColor,
+                            0.45f,
+                        )
+                        views.setColorStateList(
+                            R.id.widget_root,
+                            "setBackgroundTintList",
+                            android.content.res.ColorStateList.valueOf(bgTint),
+                        )
+                        views.setColorStateList(
+                            R.id.widget_progress,
+                            "setProgressTintList",
+                            android.content.res.ColorStateList.valueOf(primaryColor),
+                        )
+                    }
+                }
+            }
+        }
+
         // Artwork: pre-decoded squircle bitmap or fallback
         if (artBitmap != null && !artBitmap.isRecycled) {
             views.setImageViewBitmap(R.id.widget_art, artBitmap)
@@ -219,6 +268,10 @@ internal object WidgetViews {
         )
         views.setOnClickPendingIntent(
             R.id.widget_play_pause_container,
+            WidgetActions.togglePending(context, NowPlayingWidgetReceiver::class.java),
+        )
+        views.setOnClickPendingIntent(
+            R.id.widget_state,
             WidgetActions.togglePending(context, NowPlayingWidgetReceiver::class.java),
         )
         views.setOnClickPendingIntent(

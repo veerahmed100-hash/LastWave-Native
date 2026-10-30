@@ -60,8 +60,14 @@ android {
         applicationId = "com.lastwave.app"
         minSdk = (project.findProperty("minSdk") as? String)?.toIntOrNull() ?: 29
         targetSdk = 35
-        versionCode = 26
-        versionName = "4.3.1"
+        versionCode = 27
+        versionName = "5.0.0"
+
+        (project.findProperty("targetAbis") as? String)?.let { prop ->
+            ndk {
+                abiFilters.addAll(prop.split(",").map { it.trim() }.filter { it.isNotEmpty() })
+            }
+        }
 
         val lastWaveLyricsToken = resolveSecret("LASTWAVE_LYRICS_TOKEN")
         val lastWaveLyricsUrl = resolveSecret("LASTWAVE_LYRICS_URL")
@@ -85,6 +91,12 @@ android {
                 cFlags += "-Wl,-z,max-page-size=16384"
                 cppFlags += "-Wl,-z,max-page-size=16384"
             }
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = false
         }
     }
 
@@ -191,7 +203,7 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
     }
 
@@ -274,6 +286,7 @@ dependencies {
     // Native in-app audio playback, background service, system media
     // controls, Bluetooth/headset controls and a MediaController-backed UI.
     implementation("androidx.media3:media3-exoplayer:1.2.1")
+    implementation("androidx.media3:media3-datasource-okhttp:1.2.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
     // Segmented provider-module path: DASH chunk source + CDM decryption.
     // Pinned to the same 1.2.1 line as exoplayer/hls to avoid binary mismatch.
@@ -323,6 +336,10 @@ kotlin {
     }
 }
 
+composeCompiler {
+    stabilityConfigurationFiles.add(rootProject.layout.projectDirectory.file("compose_compiler_config.conf"))
+}
+
 configurations.all {
     resolutionStrategy.eachDependency {
         if (requested.group == "org.jetbrains.kotlin") {
@@ -346,7 +363,7 @@ val generateNativeSecrets by tasks.registering(Exec::class) {
     // Never fail public builds when secrets absent; script emits empty header.
     isIgnoreExitValue = true
 }
-tasks.matching { it.name.startsWith("preBuild") || it.name.startsWith("configureCMake") }.configureEach {
+tasks.named("preBuild").configure {
     dependsOn(generateNativeSecrets)
 }
 

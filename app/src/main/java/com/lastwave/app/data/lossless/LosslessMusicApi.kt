@@ -11,10 +11,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import okhttp3.CertificatePinner
 import okhttp3.OkHttpClient
@@ -95,7 +97,7 @@ class LosslessMusicApi @Inject constructor(
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
     private val resolutionClient = client.newBuilder()
-        .callTimeout(4, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.SECONDS)
         .build()
 
     @Volatile
@@ -122,7 +124,13 @@ class LosslessMusicApi @Inject constructor(
      * timeout before falling back to YouTube anyway.
      */
     val isCoolingDown: Boolean
-        get() = System.currentTimeMillis() < failureCooldownUntilMs
+        get() {
+            val cooling = System.currentTimeMillis() < failureCooldownUntilMs
+            if (!cooling && consecutiveFailures > 0) {
+                consecutiveFailures = 0
+            }
+            return cooling
+        }
 
     companion object {
         // Quality presets
@@ -138,7 +146,7 @@ class LosslessMusicApi @Inject constructor(
          * Consecutive backend misses before the chain is treated as down and
          * every resolve falls through to YouTube directly.
          */
-        private const val FAILURE_COOLDOWN_THRESHOLD = 2
+        private const val FAILURE_COOLDOWN_THRESHOLD = 3
 
         /** How long a backed-off backend stays out of the resolve path. */
         private const val FAILURE_COOLDOWN_MS = 30_000L
@@ -370,9 +378,14 @@ class LosslessMusicApi @Inject constructor(
             "live", "concert", "unplugged", "acoustic", "instrumental", "karaoke",
             "vocals", "vocal", "acapella", "acappella", "backing", "stems", "stem",
             "cover", "demo", "reprise", "remake", "rework", "extended", "edit",
+            "version", "mix", "dub", "vip", "session", "sessions",
             "sped", "slowed", "reverb", "nightcore", "lofi", "orchestral", "symphonic",
             "part", "pt", "chapter", "atmos", "dolby", "spatial",
-        )
+            "カバー", "カラオケ", "リミックス", "ライブ", "アコースティック",
+            "インスト", "バージョン", "歌ってみた", "踊ってみた", "弾いてみた",
+            "翻唱", "现场", "混音",
+            "커버", "라이브", "리믹스",
+        ) + LANGUAGE_TOKENS
 
         private val NEUTRAL_SEGMENTS = setOf(
             "albumversion", "originalversion", "originalmix", "singleversion",
@@ -388,7 +401,6 @@ class LosslessMusicApi @Inject constructor(
             "featuring", "with", "new", "latest", "free", "download", "remaster",
             "remastered", "explicit", "clean", "bonus", "track", "deluxe", "original",
             "album", "single", "hd", "hq", "4k", "mp3", "ost", "soundtrack", "mv",
-            "version", "versions", "mix", "mixes",
         )
 
         private val RECORD_LABELS = setOf(
@@ -529,6 +541,9 @@ class LosslessMusicApi @Inject constructor(
             )
         }
 
+        internal fun albumVersionMarkers(album: String?): Set<String> =
+            if (album.isNullOrBlank()) emptySet() else parseTitle(album).versions
+
         private fun classifySegment(
             segment: String,
             versions: MutableSet<String>,
@@ -626,8 +641,10 @@ class LosslessMusicApi @Inject constructor(
      */
     private fun noteBackendFailure() {
         consecutiveFailures++
+        Log.w(TAG, "noteBackendFailure: consecutiveFailures=$consecutiveFailures threshold=$FAILURE_COOLDOWN_THRESHOLD")
         if (consecutiveFailures >= FAILURE_COOLDOWN_THRESHOLD) {
             failureCooldownUntilMs = System.currentTimeMillis() + FAILURE_COOLDOWN_MS
+            Log.w(TAG, "noteBackendFailure: backend cooldown triggered for ${FAILURE_COOLDOWN_MS}ms")
         }
     }
 
@@ -661,19 +678,43 @@ class LosslessMusicApi @Inject constructor(
         preferredQuality: Int = QUALITY_MAX_HI_RES,
         excludedUrls: Set<String> = emptySet(),
         isDownload: Boolean = false,
+        timeoutMs: Long? = null,
     ): LosslessAudioStream? = withContext(Dispatchers.IO) {
-        if (preferredQuality == QUALITY_YOUTUBE || title.isBlank() || artist.isBlank()) {
+        if (preferredQuality == QUALITY_YOUTUBE || title.isBlank() || artist.isBlank() || isCoolingDown) {
             return@withContext null
         }
 
+        val budgetMs = timeoutMs ?: if (isDownload) 20_000L else 8_000L
+        withTimeoutOrNull(budgetMs) {
+            resolveStreamInternal(
+                title = title,
+                artist = artist,
+                expectedDurationSeconds = expectedDurationSeconds,
+                expectedAlbum = expectedAlbum,
+                preferredQuality = preferredQuality,
+                excludedUrls = excludedUrls,
+                isDownload = isDownload,
+            )
+        }
+    }
+
+    private suspend fun resolveStreamInternal(
+        title: String,
+        artist: String,
+        expectedDurationSeconds: Int?,
+        expectedAlbum: String?,
+        preferredQuality: Int,
+        excludedUrls: Set<String>,
+        isDownload: Boolean,
+    ): LosslessAudioStream? {
         val allCreds = getAllEnabledCredentials()
         if (allCreds.isEmpty()) {
-            return@withContext null
+            return null
         }
 
         if (allCreds.size == 1) {
             Log.i(TAG, "resolveStream starting for '$title' by '$artist' via addon (preferredQuality=$preferredQuality, isDownload=$isDownload)")
-            val resolved = runCatching {
+            val resolved = try {
                 resolveFromAddon(
                     title = title,
                     artist = artist,
@@ -684,14 +725,20 @@ class LosslessMusicApi @Inject constructor(
                     excludedUrls = excludedUrls,
                     isDownload = isDownload,
                 )
-            }.getOrNull()
-            if (resolved != null) return@withContext resolved
+            } catch (c: CancellationException) {
+                throw c
+            } catch (e: Throwable) {
+                Log.w(TAG, "resolveFromAddon failed for '$title': ${e.message}")
+                null
+            }
+            if (resolved != null) return resolved
 
             // Atmos fallback: if Dolby Atmos was selected but not found on the track,
             // fall back to stereo hi-res / lossless rather than failing and cooling down the backend.
             if (preferredQuality == QUALITY_DOLBY_ATMOS) {
+                if (isCoolingDown) return null
                 Log.i(TAG, "resolveStream: Dolby Atmos not found for '$title' by '$artist', falling back to stereo lossless")
-                return@withContext resolveStream(
+                return resolveStreamInternal(
                     title = title,
                     artist = artist,
                     expectedDurationSeconds = expectedDurationSeconds,
@@ -702,35 +749,40 @@ class LosslessMusicApi @Inject constructor(
                 )
             }
 
-            noteBackendFailure()
-            return@withContext null
+            return null
         }
 
         Log.i(TAG, "resolveStream racing for '$title' by '$artist' across ${allCreds.size} addons concurrently (preferredQuality=$preferredQuality, isDownload=$isDownload)")
-        val deferreds = allCreds.map { creds ->
-            async {
-                runCatching {
-                    resolveFromAddon(
-                        title = title,
-                        artist = artist,
-                        expectedDurationSeconds = expectedDurationSeconds,
-                        expectedAlbum = expectedAlbum,
-                        preferredQuality = preferredQuality,
-                        addonBaseUrl = creds.baseUrl,
-                        excludedUrls = excludedUrls,
-                        isDownload = isDownload,
-                    )
-                }.getOrNull()
-            }
+        val candidates = coroutineScope {
+            allCreds.map { creds ->
+                async {
+                    try {
+                        resolveFromAddon(
+                            title = title,
+                            artist = artist,
+                            expectedDurationSeconds = expectedDurationSeconds,
+                            expectedAlbum = expectedAlbum,
+                            preferredQuality = preferredQuality,
+                            addonBaseUrl = creds.baseUrl,
+                            excludedUrls = excludedUrls,
+                            isDownload = isDownload,
+                        )
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "resolveFromAddon failed for ${creds.baseUrl}: ${e.message}")
+                        null
+                    }
+                }
+            }.awaitAll().filterNotNull()
         }
-
-        val candidates = deferreds.awaitAll().filterNotNull()
         if (candidates.isEmpty()) {
             // Atmos fallback: if Dolby Atmos was selected but not found across addons,
             // fall back to stereo hi-res / lossless rather than failing and cooling down the backend.
             if (preferredQuality == QUALITY_DOLBY_ATMOS) {
+                if (isCoolingDown) return null
                 Log.i(TAG, "resolveStream: Dolby Atmos not found across addons for '$title' by '$artist', falling back to stereo lossless")
-                return@withContext resolveStream(
+                return resolveStreamInternal(
                     title = title,
                     artist = artist,
                     expectedDurationSeconds = expectedDurationSeconds,
@@ -741,11 +793,10 @@ class LosslessMusicApi @Inject constructor(
                 )
             }
 
-            noteBackendFailure()
-            return@withContext null
+            return null
         }
 
-        candidates.maxByOrNull { stream ->
+        return candidates.maxByOrNull { stream ->
             val tierScore = when (stream.formatId) {
                 QUALITY_DOLBY_ATMOS -> 1000
                 QUALITY_MAX_HI_RES -> 800
@@ -783,7 +834,7 @@ class LosslessMusicApi @Inject constructor(
         excludedUrls: Set<String>,
         isDownload: Boolean = false,
     ): LosslessAudioStream? {
-        val addonClient = AddonClient(addonBaseUrl, client, nativeSecrets = nativeSecrets)
+        val addonClient = AddonClient(addonBaseUrl, resolutionClient, nativeSecrets = nativeSecrets)
         val cleanArtist = cleanForSearch(artist).ifBlank { artist }
         val cleanTitle = cleanForSearch(title).ifBlank { title }
         val parsedTarget = parseTitle(title, cleanArtist, expectedAlbum)
@@ -817,6 +868,18 @@ class LosslessMusicApi @Inject constructor(
         for (query in queries) {
             currentCoroutineContext().ensureActive()
             val searchResult = addonClient.search(query, qualityParam, isAtmosPreferred)
+            val searchError = searchResult.exceptionOrNull()
+            if (searchError != null) {
+                val isServerError = searchError.message?.contains("HTTP 5") == true ||
+                    searchError.message?.contains("HTTP 429") == true ||
+                    isNetworkException(searchError)
+                if (isServerError) {
+                    Log.w(TAG, "resolveFromAddon: Addon server failed for query '$query' (${searchError.message}); fast-failing query waterfall")
+                    noteBackendFailure()
+                    return null
+                }
+                continue
+            }
             val tracks = searchResult.getOrNull() ?: continue
             if (tracks.isEmpty()) continue
 
@@ -917,6 +980,18 @@ class LosslessMusicApi @Inject constructor(
                 currentCoroutineContext().ensureActive()
                 val trackId = candidate.rawAddonId.ifBlank { candidate.id.toString() }
                 val streamResult = addonClient.stream(trackId, q, wantAtmos, isDownload = isDownload)
+                val streamError = streamResult.exceptionOrNull()
+                if (streamError != null) {
+                    val isServerError = streamError.message?.contains("HTTP 5") == true ||
+                        streamError.message?.contains("HTTP 429") == true ||
+                        isNetworkException(streamError)
+                    if (isServerError) {
+                        Log.w(TAG, "resolveFromAddon: Addon server stream failed for track '$trackId' (${streamError.message}); fast-failing candidate loop")
+                        noteBackendFailure()
+                        return null
+                    }
+                    continue
+                }
                 val stream = streamResult.getOrNull()
 
                 val rawUrl = stream?.dataUrl?.takeIf { it.isNotBlank() }
@@ -1088,8 +1163,10 @@ class LosslessMusicApi @Inject constructor(
 
         // 1. Version agreement: asking for original must never land on remix, live, acoustic, karaoke, etc.
         // And asking for remix must never land on original cut.
-        if (wanted.versions != got.versions) {
-            Log.d(TAG, "reject candidate id=${item.id}: version mismatch wanted=${wanted.versions} got=${got.versions} for '$title'")
+        val albumMarks = albumVersionMarkers(item.albumTitle)
+        val effectiveVersions = got.versions + (albumMarks intersect wanted.versions)
+        if (wanted.versions != effectiveVersions) {
+            Log.d(TAG, "reject candidate id=${item.id}: version mismatch wanted=${wanted.versions} got=$effectiveVersions for '$title'")
             return null
         }
 
@@ -1210,7 +1287,25 @@ class LosslessMusicApi @Inject constructor(
 
     private fun extractLanguages(raw: String): Set<String> {
         if (raw.isBlank()) return emptySet()
-        return normalizeText(raw).split(' ').toSet().intersect(LANGUAGE_TOKENS)
+        val result = mutableSetOf<String>()
+        if (Regex("""\p{IsTelugu}""").containsMatchIn(raw)) result += "telugu"
+        if (Regex("""\p{IsTamil}""").containsMatchIn(raw)) result += "tamil"
+        if (Regex("""\p{IsKannada}""").containsMatchIn(raw)) result += "kannada"
+        if (Regex("""\p{IsMalayalam}""").containsMatchIn(raw)) result += "malayalam"
+        if (Regex("""\p{IsGurmukhi}""").containsMatchIn(raw)) result += "punjabi"
+        if (Regex("""\p{IsBengali}""").containsMatchIn(raw)) result += "bengali"
+        if (Regex("""\p{IsGujarati}""").containsMatchIn(raw)) result += "gujarati"
+        if (Regex("""\p{IsDevanagari}""").containsMatchIn(raw)) result += "hindi"
+
+        val tokens = normalizeText(raw).split(' ').toSet()
+        for (token in tokens) {
+            when (token) {
+                in LANGUAGE_TOKENS -> result += token
+                "panjabi" -> result += "punjabi"
+                "bangla" -> result += "bengali"
+            }
+        }
+        return result
     }
 
     private fun hasAlbumOrContextOverlap(
@@ -1246,6 +1341,8 @@ class LosslessMusicApi @Inject constructor(
     /**
      * When multiple language releases exist and the request specifies an
      * expected language, filter candidates to match that language.
+     * When no language is specified, prefer clean/original candidates without
+     * dub/foreign-language markers over dubbed versions.
      * Never drops all candidates to empty.
      */
     private fun gateAmbiguousLanguage(
@@ -1258,9 +1355,15 @@ class LosslessMusicApi @Inject constructor(
         if (expectedLanguages.isNotEmpty()) {
             val matching = verified.filter {
                 val candidateLangs = extractLanguages("${it.title} ${it.albumTitle}")
-                candidateLangs.isEmpty() || candidateLangs.intersect(expectedLanguages).isNotEmpty()
+                candidateLangs.intersect(expectedLanguages).isNotEmpty()
             }
             if (matching.isNotEmpty()) return matching
+        } else {
+            val clean = verified.filter {
+                val candidateLangs = extractLanguages("${it.title} ${it.albumTitle}")
+                candidateLangs.isEmpty()
+            }
+            if (clean.isNotEmpty()) return clean
         }
         return verified
     }

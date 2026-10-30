@@ -84,6 +84,8 @@ data class MiscSettings(
      *  font (see ui/theme/Type.kt); off: the device's own system font.
      *  Defaults on so the app ships with its own identity out of the box. */
     val useCustomFont: Boolean = true,
+    /** "Use Bold Font" — on: bold typography scale; off: clean thin/regular scale. */
+    val useBoldFont: Boolean = false,
     /** Last.fm usernames pinned to the top of Home's friend-switcher sheet
      *  (long-press a friend row to toggle). Order among pinned friends
      *  follows whatever order user.getfriends itself returns them in —
@@ -113,8 +115,10 @@ data class MiscSettings(
      *  the audio session so external equalizer apps / OEM Dolby can process
      *  playback. Bypass routes (USB exclusive, bit-perfect) suspend it. */
     val systemEffectsMode: Boolean = false,
-    /** When true, shows synced music video option in the Now Playing menu (Settings -> Experimental). Off by default. */
-    val musicVideoEnabled: Boolean = false,
+    /** When true, shows floating button now playing instead of the bottom mini player card (Settings -> Experimental). */
+    val buttonNowPlayingEnabled: Boolean = false,
+    /** When true, shows synced music video option in the Now Playing menu (Settings -> Experimental). On by default. */
+    val musicVideoEnabled: Boolean = true,
     val wordByWordLyrics: Boolean = true,
     /** Preferred lyrics source (Settings -> Experimental -> Lyrics Provider).
      *  AUTO races all providers (fastest valid word-sync wins); an explicit
@@ -132,9 +136,9 @@ data class MiscSettings(
      *  When false, uses the classic standard progress slider in the player tab. */
     val wavySeekbarEnabled: Boolean = true,
     val rotatingBackgroundEnabled: Boolean = true,
-    /** When true (default), animates fluid rotating artwork in the lyrics background.
-     *  When false, uses static blurred artwork background in the lyrics view. */
-    val lyricsRotatingBackgroundEnabled: Boolean = true,
+    /** When true, animates fluid rotating artwork in the lyrics background.
+     *  When false (default), uses static blurred artwork background in the lyrics view. */
+    val lyricsRotatingBackgroundEnabled: Boolean = false,
     /** When true, keeps the screen from turning off when the user has the lyrics view open. */
     val keepLyricsScreenAwake: Boolean = false,
     /** Seconds of inactivity before the floating lyrics buttons (font size,
@@ -181,10 +185,16 @@ data class MiscSettings(
     val ytMusicHiddenSections: Set<String> = emptySet(),
     /** Custom order of YouTube Music shelves. */
     val ytMusicSectionsOrder: List<String> = emptyList(),
+    /** Universal custom order of Home screen sections (internal and YouTube Music). */
+    val homeSectionsOrder: List<String> = emptyList(),
+    /** Pinned Home screen section IDs. */
+    val pinnedHomeSections: Set<String> = emptySet(),
     /** When true, Animated Album Canvas motion video loops are displayed. */
     val canvasEnabled: Boolean = true,
     /** When true, portrait motion artwork is displayed edge-to-edge behind player controls. */
     val canvasFullBleed: Boolean = true,
+    /** When true, canvas video loops melt into ambient background gradients with a bottom fade. */
+    val canvasGradientBlurEnabled: Boolean = false,
     /** When true, canvas video loops may be fetched over cellular data. */
     val canvasOverCellular: Boolean = true,
     /** When true, anonymous listening telemetry connects to the LastWave Live Global Map. */
@@ -197,6 +207,13 @@ data class MiscSettings(
      *  Existing progress is preserved so re-enabling resumes where you left off. */
     val podcastsEnabled: Boolean = true,
     val suppressYouTubeLoginPrompt: Boolean = false,
+    val hasDismissedJoinSupportPrompt: Boolean = false,
+    /** Display name used in LastWave Jam sessions. */
+    val jamDisplayName: String = "",
+    /** Custom Jam WebSocket server URL. */
+    val jamServerUrl: String = "wss://jam.clashprojects.qd.je/ws",
+    /** Jam Room Mode default: "collaborative" or "host_only". */
+    val jamRoomMode: String = "collaborative",
 )
 
 /** Toggleable sections of the Home tab (see FeedScreen). Hero greeting and
@@ -275,6 +292,7 @@ class SettingsPreferences @Inject constructor(
     private object Keys {
         val DYNAMIC_NOW_PLAYING = booleanPreferencesKey("lw_dynamic_now_playing")
         val USE_CUSTOM_FONT = booleanPreferencesKey("lw_use_custom_font")
+        val USE_BOLD_FONT = booleanPreferencesKey("lw_use_bold_font")
         val PINNED_FRIENDS = stringSetPreferencesKey("lw_pinned_friends")
         val PREFER_LOSSLESS_STREAMING = booleanPreferencesKey("lw_prefer_lossless_streaming")
         val PREFER_PROVIDER_MODULES = booleanPreferencesKey("lw_prefer_provider_modules")
@@ -288,6 +306,7 @@ class SettingsPreferences @Inject constructor(
         val LYRICS_PROVIDER = stringPreferencesKey("lw_lyrics_provider")
         val LYRICS_OFFSET_MS = longPreferencesKey("lw_lyrics_offset_ms")
         val LYRICS_FONT_SCALE = floatPreferencesKey("lw_lyrics_font_scale")
+        val APP_VOLUME = floatPreferencesKey("lw_app_volume")
         val CROSSFADE_ENABLED = booleanPreferencesKey("lw_crossfade_enabled")
         val CROSSFADE_SECONDS = intPreferencesKey("lw_crossfade_seconds")
         val WAVY_SEEKBAR_ENABLED = booleanPreferencesKey("lw_wavy_seekbar_enabled")
@@ -305,18 +324,22 @@ class SettingsPreferences @Inject constructor(
         val DOWNLOAD_TREE_URI = stringPreferencesKey("lw_download_tree_uri")
         val DOWNLOAD_STRUCTURE = stringPreferencesKey("lw_download_structure")
         val SYSTEM_EFFECTS_MODE = booleanPreferencesKey("lw_system_effects_mode")
+        val BUTTON_NOW_PLAYING_ENABLED = booleanPreferencesKey("lw_button_now_playing_enabled")
         val MUSIC_VIDEO_ENABLED = booleanPreferencesKey("lw_music_video_enabled")
         val USE_ALBUM_ARTIST_FOLDERS = booleanPreferencesKey("lw_use_album_artist_folders")
         val PRIMARY_ARTIST_ONLY = booleanPreferencesKey("lw_primary_artist_only")
         val HIDDEN_HOME_SECTIONS = stringSetPreferencesKey("lw_hidden_home_sections")
         val YT_MUSIC_HIDDEN_SECTIONS = stringSetPreferencesKey("lw_yt_music_hidden_sections")
         val YT_MUSIC_SECTIONS_ORDER = stringPreferencesKey("lw_yt_music_sections_order")
+        val HOME_SECTIONS_ORDER = stringPreferencesKey("lw_home_sections_order")
+        val PINNED_HOME_SECTIONS = stringSetPreferencesKey("lw_pinned_home_sections")
         val ADDON_URL = stringPreferencesKey("lw_addon_url")
         val ADDON_NAME = stringPreferencesKey("lw_addon_name")
         val ADDON_ENABLED = booleanPreferencesKey("lw_addon_enabled")
         val HTTP_ADDONS_JSON = stringPreferencesKey("lw_http_addons_json")
         val CANVAS_ENABLED = booleanPreferencesKey("lw_canvas_enabled")
         val CANVAS_FULL_BLEED = booleanPreferencesKey("lw_canvas_full_bleed")
+        val CANVAS_GRADIENT_BLUR_ENABLED = booleanPreferencesKey("lw_canvas_gradient_blur_enabled")
         val CANVAS_OVER_CELLULAR = booleanPreferencesKey("lw_canvas_over_cellular")
         val LIVE_TELEMETRY_ENABLED = booleanPreferencesKey("lw_live_telemetry_enabled")
         val LIKED_SONGS_YOUTUBE_SYNC = booleanPreferencesKey("lw_liked_songs_youtube_sync")
@@ -324,6 +347,10 @@ class SettingsPreferences @Inject constructor(
         val LIKED_SONGS_LOCAL_ONLY = stringPreferencesKey("lw_liked_songs_local_only")
         val PODCASTS_ENABLED = booleanPreferencesKey("lw_podcasts_enabled")
         val SUPPRESS_YOUTUBE_LOGIN_PROMPT = booleanPreferencesKey("lw_suppress_youtube_login_prompt")
+        val HAS_DISMISSED_JOIN_SUPPORT_PROMPT = booleanPreferencesKey("lw_has_dismissed_join_support_prompt")
+        val JAM_DISPLAY_NAME = stringPreferencesKey("lw_jam_display_name")
+        val JAM_SERVER_URL = stringPreferencesKey("lw_jam_server_url")
+        val JAM_ROOM_MODE = stringPreferencesKey("lw_jam_room_mode")
     }
 
     val settings: Flow<MiscSettings> = dataStore.data
@@ -357,13 +384,15 @@ class SettingsPreferences @Inject constructor(
             MiscSettings(
                 dynamicNowPlayingEnabled = p.readSafely(Keys.DYNAMIC_NOW_PLAYING) ?: false,
                 useCustomFont = p.readSafely(Keys.USE_CUSTOM_FONT) ?: true,
+                useBoldFont = p.readSafely(Keys.USE_BOLD_FONT) ?: false,
                 pinnedFriends = p.readSafely(Keys.PINNED_FRIENDS) ?: emptySet(),
                 preferLosslessStreaming = p.readSafely(Keys.PREFER_LOSSLESS_STREAMING) ?: true,
                 preferProviderModules = p.readSafely(Keys.PREFER_PROVIDER_MODULES) ?: true,
                 losslessQuality = p.readSafely(Keys.LOSSLESS_QUALITY)?.takeIf { it in LOSSLESS_QUALITIES } ?: 27,
                 downloadQuality = p.readSafely(Keys.DOWNLOAD_QUALITY)?.takeIf { it in DOWNLOAD_QUALITIES } ?: 27,
                 systemEffectsMode = p.readSafely(Keys.SYSTEM_EFFECTS_MODE) ?: false,
-                musicVideoEnabled = p.readSafely(Keys.MUSIC_VIDEO_ENABLED) ?: false,
+                buttonNowPlayingEnabled = p.readSafely(Keys.BUTTON_NOW_PLAYING_ENABLED) ?: false,
+                musicVideoEnabled = p.readSafely(Keys.MUSIC_VIDEO_ENABLED) ?: true,
                 isStudioMasterClarityEnabled = p.readSafely(Keys.MUSIC_ENHANCER) ?: true,
                 clarityPreset = p.readSafely(Keys.CLARITY_PRESET)?.takeIf { it in 0..3 } ?: 0,
                 clarityAtmosBypass = p.readSafely(Keys.CLARITY_ATMOS_BYPASS) ?: false,
@@ -376,7 +405,7 @@ class SettingsPreferences @Inject constructor(
                 crossfadeSeconds = (p.readSafely(Keys.CROSSFADE_SECONDS) ?: 5).coerceIn(1, 12),
                 wavySeekbarEnabled = p.readSafely(Keys.WAVY_SEEKBAR_ENABLED) ?: true,
                 rotatingBackgroundEnabled = p.readSafely(Keys.ROTATING_BACKGROUND_ENABLED) ?: true,
-                lyricsRotatingBackgroundEnabled = p.readSafely(Keys.LYRICS_ROTATING_BACKGROUND_ENABLED) ?: true,
+                lyricsRotatingBackgroundEnabled = p.readSafely(Keys.LYRICS_ROTATING_BACKGROUND_ENABLED) ?: false,
                 keepLyricsScreenAwake = p.readSafely(Keys.KEEP_LYRICS_SCREEN_AWAKE) ?: false,
                 lyricsButtonsAutoHideSeconds =
                     sanitizeLyricsButtonsAutoHideSeconds(p.readSafely(Keys.LYRICS_BUTTONS_AUTO_HIDE_SECONDS)),
@@ -396,18 +425,25 @@ class SettingsPreferences @Inject constructor(
                     ?: emptySet(),
                 ytMusicHiddenSections = p.readSafely(Keys.YT_MUSIC_HIDDEN_SECTIONS) ?: emptySet(),
                 ytMusicSectionsOrder = p.readSafely(Keys.YT_MUSIC_SECTIONS_ORDER)?.split("|||")?.filter { it.isNotBlank() } ?: emptyList(),
+                homeSectionsOrder = p.readSafely(Keys.HOME_SECTIONS_ORDER)?.split("|||")?.filter { it.isNotBlank() } ?: emptyList(),
+                pinnedHomeSections = p.readSafely(Keys.PINNED_HOME_SECTIONS) ?: emptySet(),
                 addonUrl = primaryAddon?.url ?: legacyUrl,
                 addonName = primaryAddon?.name ?: legacyName,
                 addonEnabled = primaryAddon?.enabled ?: legacyEnabled,
                 httpAddons = resolvedAddons,
                 canvasEnabled = p.readSafely(Keys.CANVAS_ENABLED) ?: true,
                 canvasFullBleed = p.readSafely(Keys.CANVAS_FULL_BLEED) ?: true,
+                canvasGradientBlurEnabled = p.readSafely(Keys.CANVAS_GRADIENT_BLUR_ENABLED) ?: false,
                 canvasOverCellular = p.readSafely(Keys.CANVAS_OVER_CELLULAR) ?: true,
                 liveTelemetryEnabled = p.readSafely(Keys.LIVE_TELEMETRY_ENABLED) ?: true,
                 likedSongsYouTubeSync = p.readSafely(Keys.LIKED_SONGS_YOUTUBE_SYNC) ?: true,
                 likedSongsLocalSync = p.readSafely(Keys.LIKED_SONGS_LOCAL_SYNC) ?: true,
                 podcastsEnabled = p.readSafely(Keys.PODCASTS_ENABLED) ?: true,
                 suppressYouTubeLoginPrompt = p.readSafely(Keys.SUPPRESS_YOUTUBE_LOGIN_PROMPT) ?: false,
+                hasDismissedJoinSupportPrompt = p.readSafely(Keys.HAS_DISMISSED_JOIN_SUPPORT_PROMPT) ?: false,
+                jamDisplayName = p.readSafely(Keys.JAM_DISPLAY_NAME)?.trim().orEmpty(),
+                jamServerUrl = p.readSafely(Keys.JAM_SERVER_URL)?.trim().takeIf { !it.isNullOrBlank() } ?: "wss://jam.clashprojects.qd.je/ws",
+                jamRoomMode = p.readSafely(Keys.JAM_ROOM_MODE)?.trim().takeIf { it == "host_only" || it == "collaborative" } ?: "collaborative",
             )
         }
 
@@ -565,12 +601,20 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.USE_CUSTOM_FONT] = enabled }
     }
 
+    suspend fun setUseBoldFont(enabled: Boolean) {
+        dataStore.edit { it[Keys.USE_BOLD_FONT] = enabled }
+    }
+
     suspend fun setPodcastsEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.PODCASTS_ENABLED] = enabled }
     }
 
     suspend fun setSuppressYouTubeLoginPrompt(suppress: Boolean) {
         dataStore.edit { it[Keys.SUPPRESS_YOUTUBE_LOGIN_PROMPT] = suppress }
+    }
+
+    suspend fun setDismissedJoinSupportPrompt(dismissed: Boolean = true) {
+        dataStore.edit { it[Keys.HAS_DISMISSED_JOIN_SUPPORT_PROMPT] = dismissed }
     }
 
     suspend fun setPreferLosslessStreaming(enabled: Boolean) {
@@ -607,6 +651,10 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.MUSIC_VIDEO_ENABLED] = enabled }
     }
 
+    suspend fun setButtonNowPlayingEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.BUTTON_NOW_PLAYING_ENABLED] = enabled }
+    }
+
     suspend fun setStudioMasterClarity(enabled: Boolean) {
         dataStore.edit { it[Keys.MUSIC_ENHANCER] = enabled }
     }
@@ -635,12 +683,20 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.LYRICS_OFFSET_MS] = offsetMs.coerceIn(-10000L, 10000L) }
     }
 
+    val appVolume: Flow<Float> = dataStore.data.map { it[Keys.APP_VOLUME] ?: 1.0f }
+
+    suspend fun setAppVolume(volume: Float) {
+        dataStore.edit { it[Keys.APP_VOLUME] = volume.coerceIn(0f, 1f) }
+    }
+
     suspend fun setLyricsFontScale(scale: Float) {
         dataStore.edit { it[Keys.LYRICS_FONT_SCALE] = scale.coerceIn(0.7f, 1.5f) }
     }
 
     suspend fun setCrossfadeEnabled(enabled: Boolean) {
-        dataStore.edit { it[Keys.CROSSFADE_ENABLED] = enabled }
+        dataStore.edit {
+            it[Keys.CROSSFADE_ENABLED] = enabled
+        }
     }
 
     suspend fun setCrossfadeSeconds(seconds: Int) {
@@ -740,6 +796,57 @@ class SettingsPreferences @Inject constructor(
         }
     }
 
+    suspend fun saveUniversalHomeSections(order: List<String>, hidden: Set<String>, pinned: Set<String>) {
+        dataStore.edit { prefs ->
+            prefs[Keys.HOME_SECTIONS_ORDER] = order.joinToString("|||")
+            val inApp = hidden.filter { id -> HomeSection.entries.any { it.id == id } }.toSet()
+            val yt = hidden.filter { id -> id.startsWith("yt:") }.map { it.removePrefix("yt:") }.toSet()
+            prefs[Keys.HIDDEN_HOME_SECTIONS] = inApp
+            prefs[Keys.YT_MUSIC_HIDDEN_SECTIONS] = yt
+            prefs[Keys.PINNED_HOME_SECTIONS] = pinned
+        }
+    }
+
+    suspend fun togglePinHomeSection(sectionKey: String) {
+        dataStore.edit { prefs ->
+            val currentPinned = prefs.readSafely(Keys.PINNED_HOME_SECTIONS) ?: emptySet()
+            val isCurrentlyPinned = sectionKey in currentPinned
+            val newPinned = if (isCurrentlyPinned) currentPinned - sectionKey else currentPinned + sectionKey
+            prefs[Keys.PINNED_HOME_SECTIONS] = newPinned
+
+            val rawOrder = prefs.readSafely(Keys.HOME_SECTIONS_ORDER)?.split("|||")?.filter { it.isNotBlank() } ?: emptyList()
+            if (!isCurrentlyPinned && rawOrder.isNotEmpty()) {
+                val list = rawOrder.toMutableList()
+                list.remove(sectionKey)
+                list.add(0, sectionKey)
+                prefs[Keys.HOME_SECTIONS_ORDER] = list.joinToString("|||")
+            }
+        }
+    }
+
+    suspend fun hideHomeSectionById(sectionKey: String) {
+        dataStore.edit { prefs ->
+            if (sectionKey.startsWith("yt:")) {
+                val ytName = sectionKey.removePrefix("yt:")
+                val current = prefs.readSafely(Keys.YT_MUSIC_HIDDEN_SECTIONS) ?: emptySet()
+                prefs[Keys.YT_MUSIC_HIDDEN_SECTIONS] = current + ytName
+            } else {
+                val current = prefs.readSafely(Keys.HIDDEN_HOME_SECTIONS) ?: emptySet()
+                prefs[Keys.HIDDEN_HOME_SECTIONS] = current + sectionKey
+            }
+        }
+    }
+
+    suspend fun resetUniversalHomeSections() {
+        dataStore.edit { prefs ->
+            prefs.remove(Keys.HOME_SECTIONS_ORDER)
+            prefs.remove(Keys.PINNED_HOME_SECTIONS)
+            prefs.remove(Keys.HIDDEN_HOME_SECTIONS)
+            prefs.remove(Keys.YT_MUSIC_HIDDEN_SECTIONS)
+            prefs.remove(Keys.YT_MUSIC_SECTIONS_ORDER)
+        }
+    }
+
     /**
      * Synchronous mirror for `attachBaseContext`, which runs before DataStore
      * can deliver a value. commit() on IO: immune to process-kill races and
@@ -778,6 +885,10 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.CANVAS_FULL_BLEED] = enabled }
     }
 
+    suspend fun setCanvasGradientBlurEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.CANVAS_GRADIENT_BLUR_ENABLED] = enabled }
+    }
+
     suspend fun setCanvasOverCellular(enabled: Boolean) {
         dataStore.edit { it[Keys.CANVAS_OVER_CELLULAR] = enabled }
     }
@@ -813,6 +924,18 @@ class SettingsPreferences @Inject constructor(
         dataStore.edit { it[Keys.LIKED_SONGS_LOCAL_ONLY] = value }
     }
 
+    suspend fun setJamDisplayName(name: String) {
+        dataStore.edit { it[Keys.JAM_DISPLAY_NAME] = name.trim() }
+    }
+
+    suspend fun setJamServerUrl(url: String) {
+        val trimmed = url.trim().ifEmpty { "wss://jam.clashprojects.qd.je/ws" }
+        dataStore.edit { it[Keys.JAM_SERVER_URL] = trimmed }
+    }
+
+    suspend fun setJamRoomMode(mode: String) {
+        dataStore.edit { it[Keys.JAM_ROOM_MODE] = mode }
+    }
     private companion object {
         val LOSSLESS_QUALITIES = setOf(-1, 4, 5, 6, 7, 27, 28)
         val DOWNLOAD_QUALITIES = setOf(-1, 4, 5, 6, 7, 27, 28)

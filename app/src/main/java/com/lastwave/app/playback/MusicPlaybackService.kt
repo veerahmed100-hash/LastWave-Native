@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.core.graphics.ColorUtils
 import androidx.core.graphics.drawable.toBitmap
 import androidx.media.MediaBrowserServiceCompat
+import androidx.media.VolumeProviderCompat
 import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
@@ -83,6 +84,8 @@ private fun sameServiceState(previous: MusicPlayerState, current: MusicPlayerSta
         previous.speed == current.speed &&
         previous.shuffleEnabled == current.shuffleEnabled &&
         previous.repeatMode == current.repeatMode &&
+        previous.isCasting == current.isCasting &&
+        previous.appVolume == current.appVolume &&
         (previous.isPlaying || current.isPlaying || previous.positionMs == current.positionMs)
 
 /**
@@ -102,6 +105,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
     @Inject lateinit var androidAutoLibrary: AndroidAutoMediaLibrary
     @Inject lateinit var trackLikeController: TrackLikeController
     @Inject lateinit var liveTelemetryRepository: com.lastwave.app.data.repository.LiveTelemetryRepository
+    @Inject lateinit var jamPlaybackSync: com.lastwave.app.playback.jam.JamPlaybackSync
 
     // SupervisorJob stops sibling failure propagation; the handler below
     // additionally stops an unexpected exception in any fire-and-forget
@@ -178,13 +182,23 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
                     MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
                         MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS,
                 )
+                setPlaybackToLocal(android.media.AudioManager.STREAM_MUSIC)
                 setCallback(object : MediaSessionCompat.Callback() {
                     override fun onPlay() = musicPlayer.resume()
                     override fun onPause() = musicPlayer.pause()
                     override fun onSkipToNext() = musicPlayer.next()
                     override fun onSkipToPrevious() = musicPlayer.previous()
                     override fun onSeekTo(pos: Long) = musicPlayer.seekTo(pos)
-                    override fun onStop() = musicPlayer.stopAndClear()
+                    // A stop from an external controller (Bluetooth/car unit,
+                    // OEM media card, system UI) ends playback but must not
+                    // destroy the session. Wiping the queue, the persisted
+                    // session and the notification here turned a routine focus
+                    // hand-off — another app taking over the media card, which
+                    // some OEM skins report as a stop — into "the song
+                    // disappears and I have to reopen the app". The
+                    // notification's own Stop action and ACTION_STOP still do
+                    // the destructive stop.
+                    override fun onStop() = musicPlayer.pause()
                     override fun onSkipToQueueItem(id: Long) = musicPlayer.seekToQueueItem(id.toInt())
                     override fun onSetShuffleMode(shuffleMode: Int) {
                         musicPlayer.setShuffleEnabled(shuffleMode != PlaybackStateCompat.SHUFFLE_MODE_NONE)
@@ -642,7 +656,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         // service on the isPlaying edge. If we do promote while active and the
         // system refuses, bail with START_NOT_STICKY as before.
         val state = musicPlayer.state.value
-        if (state.isPlaying || state.isBuffering) {
+        if (state.isPlaying || state.isBuffering || intent?.action == null) {
             if (!promoteForPlayback()) return START_NOT_STICKY
         }
         when (intent?.action) {
@@ -657,27 +671,18 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             ACTION_REPEAT -> musicPlayer.cycleRepeatMode()
             ACTION_STOP -> musicPlayer.stopAndClear()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (musicPlayer.state.value.isPlaying) {
-            // Something is actively playing — leave it running. The
-            // foreground notification is what keeps the service (and the
-            // process) alive; swiping the app from Recents shouldn't kill
-            // playback out from under the user.
-            super.onTaskRemoved(rootIntent)
-            return
-        }
-        // Nothing is playing when the task is removed. Stop the service to
-        // free resources, but do NOT clear the persisted session
-        // (clearSession = false): the old unconditional stopAndClear() wiped
-        // clearPersistedPlaybackSession() here too, so the paused/idle track
-        // and queue vanished and could never be restored on the next
-        // launch. Every other stopAndClear() call site (explicit stop
-        // action, notification "stop", media session onStop) is untouched
-        // and still clears the session as before.
-        musicPlayer.stopAndClear(clearSession = false)
+        // With android:stopWithTask="true" in the Manifest, the system now
+        // automatically stops this service when the task is removed from Recents.
+        // If playback is active, the service is a foreground service (promoted
+        // in onStartCommand) and will survive the task removal.
+        // If nothing is playing, the service is not foreground and will be
+        // stopped by the system, releasing wake/wifi locks via onDestroy().
+        // We no longer need to manually call stopAndClear() here — the system
+        // handles it correctly based on foreground state.
         super.onTaskRemoved(rootIntent)
     }
 
@@ -698,6 +703,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         val releasedToken = platformSessionToken
         runCatching { mediaSession?.isActive = false }
         runCatching { mediaSession?.release() }
+        castVolumeProvider = null
         // Let KWGT-style listeners clear their cached track on service death.
         runCatching { sendBroadcast(Intent("com.android.music.playbackcomplete")) }
         platformSessionToken = null
@@ -975,6 +981,7 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         // (session == null) so the fallback path keeps working.
         broadcastLegacyState(state)
         val session = mediaSession ?: return
+        updateMediaSessionVolumeRouting(state.isCasting, state.appVolume)
         publishSessionQueue(session, state)
         val isLiked = track != null && trackLikeController.isLiked(track)
         val signature = buildString {
@@ -985,6 +992,8 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             append(playbackState).append('|')
             append(state.shuffleEnabled).append('|')
             append(state.repeatMode).append('|')
+            append(state.isCasting).append('|')
+            append(state.appVolume).append('|')
             append(artworkUrl).append('|')
             append(artworkBitmap != null).append('|')
             append(isLiked)
@@ -1017,7 +1026,12 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
                         OriginOsMusicCard.loopModeOf(state.shuffleEnabled, state.repeatMode).toLong(),
                     )
                     .apply {
-                        val art = artworkBitmap
+                        val rawArt = artworkBitmap
+                        val art = if (rawArt != null && (rawArt.width > 512 || rawArt.height > 512)) {
+                            val maxDim = maxOf(rawArt.width, rawArt.height).toFloat()
+                            val scale = 512f / maxDim
+                            Bitmap.createScaledBitmap(rawArt, (rawArt.width * scale).toInt(), (rawArt.height * scale).toInt(), true)
+                        } else rawArt
                         if (art != null) {
                             putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
                             putBitmap(MediaMetadataCompat.METADATA_KEY_ART, art)
@@ -1057,6 +1071,50 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             // Binder IPC into a broken OEM media stack must not kill the
             // state collector that also drives notifications and widget.
             android.util.Log.w("MusicPlaybackService", "Media session publish failed", error)
+        }
+    }
+
+    private var castVolumeProvider: VolumeProviderCompat? = null
+
+    private fun updateMediaSessionVolumeRouting(isCasting: Boolean, appVolume: Float) {
+        val session = mediaSession ?: return
+        if (isCasting) {
+            val maxVolume = 100
+            val current = (appVolume * maxVolume).toInt().coerceIn(0, maxVolume)
+            val existing = castVolumeProvider
+            if (existing != null) {
+                existing.currentVolume = current
+            } else {
+                val newProvider = object : VolumeProviderCompat(
+                    VOLUME_CONTROL_ABSOLUTE,
+                    maxVolume,
+                    current,
+                ) {
+                    override fun onSetVolumeTo(volume: Int) {
+                        val target = volume.toFloat() / maxVolume
+                        musicPlayer.setAppVolume(target)
+                    }
+
+                    override fun onAdjustVolume(direction: Int) {
+                        val step = when (direction) {
+                            android.media.AudioManager.ADJUST_RAISE -> 0.05f
+                            android.media.AudioManager.ADJUST_LOWER -> -0.05f
+                            else -> 0f
+                        }
+                        if (step != 0f) {
+                            val currentVol = musicPlayer.state.value.appVolume
+                            musicPlayer.setAppVolume((currentVol + step).coerceIn(0f, 1f))
+                        }
+                    }
+                }
+                castVolumeProvider = newProvider
+                session.setPlaybackToRemote(newProvider)
+            }
+        } else {
+            if (castVolumeProvider != null) {
+                castVolumeProvider = null
+                session.setPlaybackToLocal(android.media.AudioManager.STREAM_MUSIC)
+            }
         }
     }
 
@@ -1113,7 +1171,6 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
 
     private fun publishNotification(state: MusicPlayerState, force: Boolean = false) {
         val track = state.current
-        val activelyPlaying = state.isPlaying || state.isBuffering
         if (track == null) {
             notificationSignature = ""
             if (isPlaybackForeground) {
@@ -1124,20 +1181,17 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
             getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
             return
         }
-        // Paused/stopped with a track still loaded: release the foreground
-        // service privilege but keep the notification posted (DETACH), so a
-        // media-playback FGS isn't retained through an idle pause. The paused
-        // notification is still refreshed below via notify(), keeping transport
-        // controls; resume re-promotes the service on the isPlaying edge below.
-        if (!activelyPlaying && isPlaybackForeground) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_DETACH)
-            else @Suppress("DEPRECATION") stopForeground(true)
-            isPlaybackForeground = false
-        }
-        // Only startForeground() when there is something to play. While paused
-        // we stay detached (the notification remains from the DETACH above) and
-        // merely refresh it — we do not hold the FGS during idle.
-        if (!isPlaybackForeground && activelyPlaying) {
+        // A loaded track keeps the media-playback foreground service alive even
+        // while paused. Demoting to an ordinary background service on pause is
+        // what made the whole session vanish on aggressive OEMs (HyperOS/MIUI,
+        // ColorOS, One UI) the moment another app came to the front: the frozen
+        // process takes the media notification and the MediaSession with it, so
+        // there is nothing left to resume from. The FGS costs nothing while
+        // paused — updateWakeLocks() has already released the wake/wifi locks —
+        // and the system keeps the notification that carries the transport
+        // controls. Only stopAndClear() (track == null, handled above) leaves
+        // the foreground state.
+        if (!isPlaybackForeground) {
             if (!promoteForPlayback()) return
         }
         val signature = "${track.title}|${track.artist}|${track.album}|${state.isPlaying}|${state.isBuffering}|${state.shuffleEnabled}|${state.repeatMode}|$artworkUrl|${artworkBitmap != null}"
@@ -1232,6 +1286,16 @@ class MusicPlaybackService : MediaBrowserServiceCompat() {
         if (cleanUrl == artworkUrl && artworkBitmap != null) return
         artworkUrl = cleanUrl
         artworkJob?.cancel()
+
+        // Immediate memory cache lookup for zero-latency widget update
+        runCatching {
+            val cached = imageLoader.memoryCache?.get(coil.memory.MemoryCache.Key(cleanUrl))?.bitmap
+            if (cached != null && !cached.isRecycled) {
+                artworkBitmap = cached
+                widgetSignature = ""
+                publishWidget(musicPlayer.state.value)
+            }
+        }
 
         artworkJob = scope.launch {
             val expectedUrl = cleanUrl

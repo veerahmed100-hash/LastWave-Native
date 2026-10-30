@@ -406,6 +406,9 @@ static int drainAllUrbs(UsbAudioContext *ctx) {
     ctx->urbsInFlight = 0;
     ctx->submitIdx = 0;
     ctx->reapIdx = 0;
+    ctx->frameAccumulator = 0.0;
+    ctx->residualBytes = 0;
+    memset(ctx->residualBuffer, 0, sizeof(ctx->residualBuffer));
     if (ctx->running.load() && ctx->endpointFeedback > 0 && !ctx->feedbackInFlight) {
         submitFeedbackUrb(ctx);
     }
@@ -659,6 +662,7 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeFlush(
     if (!ctx) return;
     ctx->frameAccumulator = 0.0;
     ctx->residualBytes = 0;
+    memset(ctx->residualBuffer, 0, sizeof(ctx->residualBuffer));
     LOGI("Flush: frameAccumulator and residual reset (framesWritten=%lld)",
          (long long)ctx->framesWritten);
 }
@@ -719,14 +723,7 @@ Java_com_decent_usbaudio_UsbAudioStream_nativeUsbReset(
     LOGI("USBDEVFS_RESET fd=%d", fd);
     int ret = ioctl(fd, USBDEVFS_RESET, 0);
     if (ret < 0) { LOGE("RESET FAILED errno=%d", errno); return ret; }
-    LOGI("RESET OK, claiming interfaces...");
-    struct usbdevfs_ioctl cmd = {}; cmd.ifno = 0; cmd.ioctl_code = USBDEVFS_DISCONNECT;
-    ioctl(fd, USBDEVFS_IOCTL, &cmd);
-    int i0 = 0; ioctl(fd, USBDEVFS_CLAIMINTERFACE, &i0);
-    cmd.ifno = 1; ioctl(fd, USBDEVFS_IOCTL, &cmd);
-    int i1 = 1; ioctl(fd, USBDEVFS_CLAIMINTERFACE, &i1);
-    struct usbdevfs_setinterface si = {}; si.interface = 1; si.altsetting = 0;
-    ioctl(fd, USBDEVFS_SETINTERFACE, &si);
+    LOGI("RESET OK (descriptor-directed claiming handled in UsbAudioDevice.openDevice)");
     return 0;
 }
 
@@ -747,23 +744,32 @@ void padInt16ToInt24(const uint8_t *src, uint8_t *dst, int numSamples) {
 void padInt16ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *out = reinterpret_cast<int32_t *>(dst);
     auto *in16 = reinterpret_cast<const int16_t *>(src);
-    for (int i = 0; i < numSamples; i++) out[i] = (int32_t)in16[i] << 16;
+    for (int i = 0; i < numSamples; i++) {
+        out[i] = static_cast<int32_t>(static_cast<uint32_t>(static_cast<int32_t>(in16[i])) << 16);
+    }
 }
 
 // int32 (24-bit sign-extended from libFLAC) → 32-bit: shift left 8
 void shiftInt32From24(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *out = reinterpret_cast<int32_t *>(dst);
     auto *in32 = reinterpret_cast<const int32_t *>(src);
-    for (int i = 0; i < numSamples; i++) out[i] = in32[i] << 8;
+    for (int i = 0; i < numSamples; i++) {
+        out[i] = static_cast<int32_t>(static_cast<uint32_t>(in32[i]) << 8);
+    }
 }
 
 // 24-bit packed (3 bytes/sample) → 32-bit: read 3 bytes, sign-extend, shift left 8
 void padInt24ToInt32(const uint8_t *src, uint8_t *dst, int numSamples) {
     auto *out = reinterpret_cast<int32_t *>(dst);
     for (int i = 0; i < numSamples; i++) {
-        int32_t s = src[i*3] | (src[i*3+1] << 8) | (src[i*3+2] << 16);
-        if (s & 0x800000) s |= 0xFF000000;  // sign-extend from 24 to 32 bits
-        out[i] = s << 8;  // shift to fill 32-bit range
+        uint32_t b0 = static_cast<uint32_t>(src[i * 3]);
+        uint32_t b1 = static_cast<uint32_t>(src[i * 3 + 1]);
+        uint32_t b2 = static_cast<uint32_t>(src[i * 3 + 2]);
+        uint32_t u = (b2 << 16) | (b1 << 8) | b0;
+        if (u & 0x800000) {
+            u |= 0xFF000000;
+        }
+        out[i] = static_cast<int32_t>(u << 8);
     }
 }
 
@@ -898,6 +904,9 @@ void submitPcmToUrbs(UsbAudioContext *ctx, const uint8_t *pcmData, int totalByte
         }
 
         UrbSlot *slot = &ctx->ring[ctx->submitIdx];
+        if (slot->dataLength > urbBytes) {
+            memset(slot->buffer + urbBytes, 0, slot->dataLength - urbBytes);
+        }
         memcpy(slot->buffer, data + offset, urbBytes);
 
         if (submitRingUrb(ctx, pktSizes, numPackets, urbBytes) < 0) {

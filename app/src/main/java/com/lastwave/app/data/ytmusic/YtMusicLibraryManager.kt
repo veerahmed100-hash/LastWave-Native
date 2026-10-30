@@ -296,7 +296,7 @@ class YtMusicLibraryManager @Inject constructor(
     }
 
     private fun writeToDiskCache(localId: Long, playlist: SavedPlaylist) {
-        if (playlist.remoteTrackCount == null) return
+        if (playlist.tracks.isEmpty()) return
         try {
             val file = File(cacheDir, "$localId.json")
             val cached = YtCachedDetail(
@@ -362,7 +362,9 @@ class YtMusicLibraryManager @Inject constructor(
         if (summary != null) {
             val stub = disk ?: summaryToPlaylist(summary)
             details[localId] = stub
-            onUpdate?.invoke(stub)
+            if (stub.tracks.isNotEmpty()) {
+                onUpdate?.invoke(stub)
+            }
         }
 
         refreshDetailFromNetwork(localId, onUpdate)
@@ -399,8 +401,26 @@ class YtMusicLibraryManager @Inject constructor(
             details[localId] = partialPlaylist
             onUpdate?.invoke(partialPlaylist)
         } ?: run {
-            val fallback = details[localId] ?: readFromDiskCache(localId)
-            if (fallback != null) onUpdate?.invoke(fallback)
+            val fallback = details[localId]?.takeIf { it.tracks.isNotEmpty() } ?: readFromDiskCache(localId)
+            if (fallback != null) {
+                onUpdate?.invoke(fallback)
+                return@withContext fallback
+            }
+            if (PlaylistImportManager.isYtLikedId(remoteId)) {
+                val localLiked = playlistRepository.getLikedSongs()
+                if (localLiked != null && localLiked.tracks.isNotEmpty()) {
+                    val adopted = localLiked.copy(
+                        id = localId,
+                        title = LIKED_YT_SONGS_TITLE,
+                        subtitle = "YouTube Music • Connected account",
+                        mode = "youtube_remote",
+                        remotePlaylistId = remoteId,
+                    )
+                    details[localId] = adopted
+                    onUpdate?.invoke(adopted)
+                    return@withContext adopted
+                }
+            }
             return@withContext fallback
         }
 
@@ -424,15 +444,12 @@ class YtMusicLibraryManager @Inject constructor(
             createdAtMillis = 0L,
             remotePlaylistId = result.id,
             remoteArtworkUrl = artworkUrl,
-            // Track count is unknown when continuation pages failed — leave it
-            // null so loadDetail treats this as refreshable instead of
-            // serving a truncated snapshot as final.
-            remoteTrackCount = trackCount.takeIf { result.isComplete },
+            remoteTrackCount = trackCount ?: result.tracks.size,
         )
         details[localId] = playlist
-        if (result.isComplete) {
+        if (playlist.tracks.isNotEmpty()) {
             writeToDiskCache(localId, playlist)
-            updateRemoteTrackCount(remoteId, trackCount)
+            updateRemoteTrackCount(remoteId, trackCount ?: result.tracks.size)
         }
         onUpdate?.invoke(playlist)
         playlist
@@ -687,7 +704,7 @@ class YtMusicLibraryManager @Inject constructor(
             title = if (isLiked) LIKED_YT_SONGS_TITLE else summary.title,
             subtitle = "YouTube Music • Connected account",
             mode = "youtube_remote",
-            tracks = emptyList(),
+            tracks = details[id]?.tracks ?: readFromDiskCache(id)?.tracks ?: emptyList(),
             createdAtMillis = 0L,
             remotePlaylistId = summary.id,
             remoteArtworkUrl = artwork,

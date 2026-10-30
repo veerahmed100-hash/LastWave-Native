@@ -9,6 +9,8 @@ import com.lastwave.app.data.artwork.ArtworkNormalizer
 import com.lastwave.app.data.artwork.ArtworkRepository
 import com.lastwave.app.data.artwork.DeferredArtworkLookup
 import com.lastwave.app.data.local.AccentMode
+import com.lastwave.app.data.local.AppIcon
+import com.lastwave.app.data.local.AppIconManager
 import com.lastwave.app.data.local.MiscSettings
 import com.lastwave.app.data.local.SettingsPreferences
 import com.lastwave.app.data.local.ThemePreferences
@@ -24,6 +26,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import android.os.Handler
 import android.os.Looper
@@ -46,6 +49,7 @@ data class ThemeUiState(
     /** Settings' "Use Application Font" toggle — see ui/theme/Type.kt for
      *  what turning it off falls back to. */
     val useCustomFont: Boolean = true,
+    val useBoldFont: Boolean = false,
     /** Experimental liquid-glass materials (Settings → Experimental). When
      *  true, container roles in [colorScheme] are semi-translucent and the
      *  chrome surfaces get specular glass dressing. */
@@ -59,6 +63,7 @@ data class ThemeUiState(
     val isNowPlayingThemed: Boolean = false,
     /** Dedicated LastWave Signature Theme inspired by the app logo icon (#C9FB00 & #012226). */
     val isLastWaveTheme: Boolean = false,
+    val appIcon: AppIcon = AppIcon.DEFAULT,
 )
 
 @Singleton
@@ -182,6 +187,12 @@ class ThemeRepository @Inject constructor(
                 android.util.Log.w("ThemeRepository", "Wallpaper listener unsupported on this ROM", error)
             }
         }
+
+        applicationScope.launch {
+            themePreferences.prefs.map { it.appIcon }.distinctUntilChanged().collect { icon ->
+                AppIconManager.applyIcon(context, icon)
+            }
+        }
     }
 
     /** Wallpaper seed for DYNAMIC mode on pre-S devices (and as the data-layer
@@ -259,11 +270,13 @@ class ThemeRepository @Inject constructor(
             mode = prefs.accentMode,
             accentColorHex = if (isLastWave) "#C9FB00" else prefs.accentColor,
             useCustomFont = misc.useCustomFont,
+            useBoldFont = misc.useBoldFont,
             liquidGlass = isGlass,
             md3NavBar = prefs.md3NavBar,
             hideNavTabs = prefs.hideNavTabs,
             isNowPlayingThemed = nowPlayingActive,
             isLastWaveTheme = isLastWave,
+            appIcon = prefs.appIcon,
         )
     }.stateIn(
         applicationScope,
@@ -277,10 +290,12 @@ class ThemeRepository @Inject constructor(
             mode = AccentMode.MANUAL,
             accentColorHex = "#E03030",
             useCustomFont = true,
+            useBoldFont = false,
             liquidGlass = true,
             md3NavBar = false,
             hideNavTabs = false,
             isLastWaveTheme = false,
+            appIcon = AppIcon.DEFAULT,
         ),
     )
 
@@ -289,6 +304,11 @@ class ThemeRepository @Inject constructor(
     }
 
     suspend fun setLastWaveTheme(enabled: Boolean) = themePreferences.setLastWaveTheme(enabled)
+
+    suspend fun setAppIcon(icon: AppIcon) {
+        themePreferences.setAppIcon(icon)
+        AppIconManager.applyIcon(context, icon)
+    }
 
     /** Manual pick always leaves DYNAMIC/MONOCHROME: choosing your own accent
      *  turns Dynamic Color off itself (ThemePreferences persists MANUAL). */

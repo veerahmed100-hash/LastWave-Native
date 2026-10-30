@@ -21,6 +21,7 @@ import com.lastwave.app.data.music.YouTubeMusicTrack
 import com.lastwave.app.data.music.YouTubePlaylistSummary
 import com.lastwave.app.playback.MusicPlayer
 import com.lastwave.app.playback.PlayableTrack
+import com.lastwave.app.data.music.toPlayableTrack
 import com.lastwave.app.data.repository.RelatedGraphRepository
 import com.lastwave.app.data.ytmusic.YtMusicAuthManager
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -57,6 +58,7 @@ data class FeedUiState(
     val chipShelves: List<HomeShelf> = emptyList(),
     val chipContinuationToken: String? = null,
     val defaultContinuationToken: String? = null,
+    val chipBackgroundUrl: String? = null,
 ) {
     /** True when a mood/activity chip is active; synthetic sections are hidden in this mode. */
     val isChipActive: Boolean get() = selectedChip != null
@@ -75,12 +77,16 @@ class FeedViewModel @Inject constructor(
     private val ytAuth: YtMusicAuthManager,
     private val homeRepository: com.lastwave.app.data.repository.HomeRepository,
     private val discoverRepository: com.lastwave.app.data.discover.DiscoverRepository,
+    private val genresRepository: com.lastwave.app.data.generate.GenresRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
     val uiState: StateFlow<FeedUiState> = _uiState.asStateFlow()
     private val _discoveryTracks = MutableStateFlow<List<GeneratedTrack>>(emptyList())
     val discoveryTracks: StateFlow<List<GeneratedTrack>> = _discoveryTracks.asStateFlow()
+
+    private val _topGenres = MutableStateFlow<List<String>>(emptyList())
+    val topGenres: StateFlow<List<String>> = _topGenres.asStateFlow()
 
     /** Ids of Home sections the user hid in Settings → Home sections. */
     val hiddenHomeSections: StateFlow<Set<String>> = settingsPreferences.settings
@@ -98,6 +104,28 @@ class FeedViewModel @Inject constructor(
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    val homeSectionsOrder: StateFlow<List<String>> = settingsPreferences.settings
+        .map { it.homeSectionsOrder }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val pinnedHomeSections: StateFlow<Set<String>> = settingsPreferences.settings
+        .map { it.pinnedHomeSections }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    fun togglePinHomeSection(sectionKey: String) {
+        viewModelScope.launch {
+            settingsPreferences.togglePinHomeSection(sectionKey)
+        }
+    }
+
+    fun hideHomeSection(sectionKey: String) {
+        viewModelScope.launch {
+            settingsPreferences.hideHomeSectionById(sectionKey)
+        }
+    }
+
     /** Podcast surfaces are hidden the moment the user turns them off. */
     val podcastsEnabled: StateFlow<Boolean> = settingsPreferences.settings
         .map { it.podcastsEnabled }
@@ -111,6 +139,7 @@ class FeedViewModel @Inject constructor(
 
     init {
         loadDiscovery()
+        loadTopGenres()
         viewModelScope.launch {
             // The podcast shelf is part of the feed, so flipping the setting
             // has to re-run the feed: the cached copy still holds the shelf.
@@ -138,7 +167,7 @@ class FeedViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
-            val stats = homeRepository.fetchStats().getOrNull()
+            val stats = runCatching { homeRepository.fetchStats().getOrNull() }.getOrNull()
             if (stats != null) {
                 _uiState.update { it.copy(avatarUrl = stats.avatarUrl) }
             }
@@ -161,7 +190,20 @@ class FeedViewModel @Inject constructor(
 
     fun refresh() {
         loadDiscovery()
+        loadTopGenres()
         fetchFeed(refreshing = true)
+    }
+
+    fun loadTopGenres() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val stats = runCatching { genresRepository.fetchGenreStats("overall") }.getOrNull().orEmpty()
+            val list = if (stats.isNotEmpty()) {
+                stats.map { it.name.trim() }.filter { it.isNotBlank() }
+            } else {
+                listOf("Pop", "Rock", "Hip-Hop", "Indie", "Electronic", "R&B", "Metal", "Jazz", "Classical", "Lo-Fi", "Country", "Alternative")
+            }
+            _topGenres.value = list
+        }
     }
 
     fun onVisible() {
@@ -205,6 +247,7 @@ class FeedViewModel @Inject constructor(
                     chipShelves = if (refreshing) emptyList() else it.chipShelves,
                     chipContinuationToken = if (refreshing) null else it.chipContinuationToken,
                     defaultContinuationToken = if (refreshing) null else it.defaultContinuationToken,
+                    chipBackgroundUrl = if (refreshing) null else it.chipBackgroundUrl,
                 )
             }
             try {
@@ -280,6 +323,7 @@ class FeedViewModel @Inject constructor(
                     isChipLoading = false,
                     chipShelves = emptyList(),
                     chipContinuationToken = null,
+                    chipBackgroundUrl = null,
                 )
             }
             return
@@ -294,6 +338,7 @@ class FeedViewModel @Inject constructor(
                 isChipLoading = true,
                 chipShelves = emptyList(),
                 chipContinuationToken = null,
+                chipBackgroundUrl = null,
                 error = null,
             )
         }
@@ -308,6 +353,7 @@ class FeedViewModel @Inject constructor(
                         isChipLoading = false,
                         chipShelves = page.shelves,
                         chipContinuationToken = page.continuationToken,
+                        chipBackgroundUrl = page.backgroundUrl,
                     )
                 }
             } catch (cancellation: CancellationException) {
@@ -319,6 +365,7 @@ class FeedViewModel @Inject constructor(
                         it.copy(
                             selectedChip = null,
                             isChipLoading = false,
+                            chipBackgroundUrl = null,
                             error = appContext.getString(com.lastwave.app.R.string.feed_update_error),
                         )
                     }
@@ -402,9 +449,26 @@ class FeedViewModel @Inject constructor(
         val firstId = when (val item = shelf.items.firstOrNull()) {
             is HomeShelfItem.Track -> item.track.videoId
             is HomeShelfItem.Playlist -> item.playlist.id
+            is HomeShelfItem.PodcastEpisode -> item.videoId
+            is HomeShelfItem.PodcastShow -> item.browseId
             null -> ""
         }
         return "${shelf.title.trim().lowercase()}_$firstId"
+    }
+
+    fun playPodcastEpisode(
+        episode: HomeShelfItem.PodcastEpisode,
+        queue: List<HomeShelfItem.PodcastEpisode> = listOf(episode),
+        sourceLabel: String = "Podcasts",
+    ) {
+        val tracks = queue.map { it.toPlayableTrack() }
+        val index = queue.indexOfFirst { it.videoId == episode.videoId }.coerceAtLeast(0)
+        musicPlayer.playPodcastQueue(
+            tracks = tracks,
+            startIndex = index,
+            startPositionMs = 0L,
+            sourceLabel = episode.showName?.takeIf { it.isNotBlank() } ?: sourceLabel,
+        )
     }
 
     fun playTrack(track: YouTubeMusicTrack, sourceLabel: String = "Feed") {
