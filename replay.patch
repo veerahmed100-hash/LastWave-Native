@@ -394,15 +394,19 @@ index 0000000..0effe63
 +}
 diff --git a/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt b/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt
 new file mode 100644
-index 0000000..2f921a3
+index 0000000..ba05d9d
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,221 @@
 +package com.lastwave.app.data.repository
 +
++import com.lastwave.app.data.artwork.ArtworkRepository
 +import com.lastwave.app.data.genre.GenreResolver
 +import com.lastwave.app.data.local.db.PlayEventDao
 +import com.lastwave.app.data.local.db.PlayEventEntity
++import kotlinx.coroutines.async
++import kotlinx.coroutines.awaitAll
++import kotlinx.coroutines.coroutineScope
 +import kotlinx.coroutines.withTimeoutOrNull
 +import java.time.DayOfWeek
 +import java.time.LocalDate
@@ -462,6 +466,7 @@ index 0000000..2f921a3
 +class ReplayRepository @Inject constructor(
 +    private val dao: PlayEventDao,
 +    private val genreResolver: GenreResolver,
++    private val artworkRepository: ArtworkRepository,
 +) {
 +    /**
 +     * Saves one play if the track was heard long enough: half its length or
@@ -508,9 +513,14 @@ index 0000000..2f921a3
 +        val songs = dao.topTracks(from, to, CHART_LENGTH).mapIndexed { i, t ->
 +            ReplayRow(t.trackKey, i + 1, t.title, t.artist, t.artworkUrl, t.plays, t.totalMs)
 +        }
-+        val artists = dao.topArtists(from, to, CHART_LENGTH).mapIndexed { i, a ->
-+            ReplayRow(a.artist.lowercase(), i + 1, a.artist, null, a.artworkUrl, a.plays, a.totalMs)
-+        }
++        // Artists show the artist's own photo (the same source the Home screen
++        // uses), never the album art of one of their songs. Rows without a
++        // photo get no image and the screens draw an initial instead.
++        val artists = withArtistPhotos(
++            dao.topArtists(from, to, CHART_LENGTH).mapIndexed { i, a ->
++                ReplayRow(a.artist.lowercase(), i + 1, a.artist, null, null, a.plays, a.totalMs)
++            },
++        )
 +        val albums = dao.topAlbums(from, to, CHART_LENGTH).mapIndexed { i, a ->
 +            ReplayRow("${a.album}|${a.artist}".lowercase(), i + 1, a.album, a.artist, a.artworkUrl, a.plays, a.totalMs)
 +        }
@@ -533,6 +543,17 @@ index 0000000..2f921a3
 +            biggestDayLabel = day?.let { dayLabel(it.day) },
 +            biggestDayMs = day?.totalMs ?: 0L,
 +        )
++    }
++
++    private suspend fun withArtistPhotos(rows: List<ReplayRow>): List<ReplayRow> = coroutineScope {
++        rows.map { row ->
++            async {
++                val photo = withTimeoutOrNull(PHOTO_TIMEOUT_MS) {
++                    runCatching { artworkRepository.resolveArtist(row.title) }.getOrNull()
++                }
++                row.copy(artworkUrl = photo)
++            }
++        }.awaitAll()
 +    }
 +
 +    private suspend fun buildGenreRows(from: Long, to: Long): List<ReplayRow> {
@@ -594,6 +615,7 @@ index 0000000..2f921a3
 +        const val MIN_PLAY_MS = 30_000L
 +        const val MAX_PLAY_MS = 240_000L
 +        const val GENRE_TIMEOUT_MS = 8_000L
++        const val PHOTO_TIMEOUT_MS = 6_000L
 +        const val CHART_LENGTH = 5
 +    }
 +}
@@ -1021,10 +1043,10 @@ index ccdf04d..a609790 100644
 +        database.playEventDao()
  }
 diff --git a/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt b/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
-index 1956bc4..bd59cba 100644
+index 21184c8..e516cd4 100644
 --- a/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
 +++ b/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
-@@ -752,6 +752,8 @@ class MusicPlayer @Inject constructor(
+@@ -845,6 +845,8 @@ class MusicPlayer @Inject constructor(
                  artworkUrl = previousTrack.artworkUrl,
                  listenedMs = previousPositionMs,
                  completed = completedNaturally,
@@ -1034,10 +1056,10 @@ index 1956bc4..bd59cba 100644
              if (wasSkip) {
                  repo.recordSkip(previousTrack.title, previousTrack.artist, previousTrack.videoId)
 diff --git a/app/src/main/java/com/lastwave/app/ui/home/HomeScreen.kt b/app/src/main/java/com/lastwave/app/ui/home/HomeScreen.kt
-index 1d04e47..b9ca71f 100644
+index 05b76d5..1dd50a0 100644
 --- a/app/src/main/java/com/lastwave/app/ui/home/HomeScreen.kt
 +++ b/app/src/main/java/com/lastwave/app/ui/home/HomeScreen.kt
-@@ -170,6 +170,7 @@ fun HomeScreen(
+@@ -171,6 +171,7 @@ fun HomeScreen(
      onOpenSearch: () -> Unit,
      onOpenDiscover: () -> Unit,
      onOpenGenres: () -> Unit,
@@ -1045,7 +1067,7 @@ index 1d04e47..b9ca71f 100644
      onOpenFriends: () -> Unit,
      onOpenDownloads: () -> Unit = {},
      viewModel: HomeViewModel = hiltViewModel(),
-@@ -258,6 +259,33 @@ fun HomeScreen(
+@@ -262,6 +263,33 @@ fun HomeScreen(
                  Spacer(Modifier.height(12.dp))
              }
  
@@ -1080,10 +1102,10 @@ index 1d04e47..b9ca71f 100644
              PullToRefreshBox(
                  isRefreshing = uiState.isRefreshing,
 diff --git a/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt b/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
-index 7c5de49..fd73a4a 100644
+index 60099e2..de9e18d 100644
 --- a/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
 +++ b/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
-@@ -261,6 +261,7 @@ fun LastWaveNavHost(
+@@ -296,6 +296,7 @@ fun LastWaveNavHost(
                  onOpenSearch = { navController.navigate(Screen.Search.route) },
                  onOpenDiscover = { navController.navigate(Screen.Discover.route) },
                  onOpenGenres = { navController.navigate(Screen.Genres.route) },
@@ -1091,7 +1113,7 @@ index 7c5de49..fd73a4a 100644
                  onOpenFriends = { navController.navigate(Screen.Friends.route) },
                  onOpenFriendProfile = { username, displayName, avatarUrl ->
                      navController.navigate(Screen.FriendProfile.createRoute(username, displayName, avatarUrl))
-@@ -386,6 +387,13 @@ fun LastWaveNavHost(
+@@ -421,6 +422,13 @@ fun LastWaveNavHost(
          // onBack (its toolbar back button) still pops directly; the wrap
          // only adds the gesture-driven path, it doesn't replace the
          // button's.
@@ -1102,8 +1124,8 @@ index 7c5de49..fd73a4a 100644
 +                )
 +            }
 +        }
-         composable(Screen.Genres.route) {
-             PredictiveBackScreen(onBack = { navController.popBackStack() }) {
+         composable(Screen.Genres.route) { backStackEntry ->
+             PredictiveBackScreen(onBack = { navController.safePopBackStack(backStackEntry) }) {
                  GenresScreen(
 diff --git a/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt b/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt
 index 22659a6..df8deea 100644
@@ -1119,13 +1141,15 @@ index 22659a6..df8deea 100644
      data object Friends : Screen("friends")
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayFormat.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayFormat.kt
 new file mode 100644
-index 0000000..46b92dd
+index 0000000..aac00f2
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayFormat.kt
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,98 @@
 +package com.lastwave.app.ui.replay
 +
 +import com.lastwave.app.data.repository.ReplayPeriod
++import com.lastwave.app.data.repository.ReplayRow
++import com.lastwave.app.data.repository.ReplaySummary
 +import java.time.LocalDate
 +import java.time.format.TextStyle
 +import java.util.Locale
@@ -1189,9 +1213,39 @@ index 0000000..46b92dd
 +
 +internal fun plural(count: Int, one: String, many: String = one + "s"): String =
 +    if (count == 1) "1 $one" else "$count $many"
++
++/** Headline split as (plain start, bold middle, plain end) for a story card. */
++internal fun storyTitleParts(
++    page: StoryPage,
++    summary: ReplaySummary,
++    period: ReplayPeriod,
++): Triple<String, String, String> = when (page) {
++    StoryPage.INTRO -> Triple("Your ", "Replay", " is ready.")
++    StoryPage.MINUTES -> Triple("You spent ", "${totalMinutes(summary.totalMs)} minutes", " with music.")
++    StoryPage.ARTIST -> Triple(allSpan(period) + ", ", "One artist", " kept coming back.")
++    StoryPage.SONG -> Triple(
++        "In total, ",
++        plural(summary.distinctSongs, "song"),
++        " filled your ${fillSpan(period)}.",
++    )
++    StoryPage.ALBUM -> Triple("This time, ", "One album", " held your attention.")
++    StoryPage.GENRES -> Triple("Together, ", "Your genres", " shaped your sound.")
++    StoryPage.EXPLORED -> Triple(
++        "You explored ",
++        plural(summary.distinctSongs, "song"),
++        " from ${plural(summary.distinctArtists, "artist")}.",
++    )
++    StoryPage.SUMMARY -> Triple("Your ", periodNoun(period), " in music.")
++}
++
++/** Small lines under the featured artist, song or album (one per line). */
++internal fun featureSubtitle(page: StoryPage, row: ReplayRow): String {
++    val tail = "${formatMinutes(row.ms)} · ${plural(row.plays, "Play")}"
++    return if (page == StoryPage.ARTIST) tail else listOfNotNull(row.subtitle, tail).joinToString("\n")
++}
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayPoster.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayPoster.kt
 new file mode 100644
-index 0000000..d49206c
+index 0000000..8a9e0f6
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayPoster.kt
 @@ -0,0 +1,227 @@
@@ -1246,7 +1300,7 @@ index 0000000..d49206c
 +            draw(summary, period, art)
 +        }
 +
-+    private suspend fun load(context: Context, url: String): Bitmap? = runCatching {
++    internal suspend fun load(context: Context, url: String): Bitmap? = runCatching {
 +        val request = ImageRequest.Builder(context)
 +            .data(url)
 +            .allowHardware(false)
@@ -1255,7 +1309,7 @@ index 0000000..d49206c
 +        ((context.imageLoader.execute(request) as? SuccessResult)?.drawable as? BitmapDrawable)?.bitmap
 +    }.getOrNull()
 +
-+    private fun text(size: Float, bold: Boolean, color: Int, spacing: Float = 0f) =
++    internal fun text(size: Float, bold: Boolean, color: Int, spacing: Float = 0f) =
 +        Paint(Paint.ANTI_ALIAS_FLAG).apply {
 +            textSize = size
 +            typeface = Typeface.create("sans-serif", if (bold) Typeface.BOLD else Typeface.NORMAL)
@@ -1263,7 +1317,7 @@ index 0000000..d49206c
 +            letterSpacing = spacing
 +        }
 +
-+    private fun fit(text: String, paint: Paint, maxWidth: Float): String {
++    internal fun fit(text: String, paint: Paint, maxWidth: Float): String {
 +        if (paint.measureText(text) <= maxWidth) return text
 +        val room = maxWidth - paint.measureText("…")
 +        val count = paint.breakText(text, true, room, null)
@@ -1374,7 +1428,7 @@ index 0000000..d49206c
 +        c.drawText(fit(line, subPaint, textWidth), tx, top + 73f, subPaint)
 +    }
 +
-+    private fun drawArt(
++    internal fun drawArt(
 +        c: Canvas,
 +        bmp: Bitmap?,
 +        label: String,
@@ -1405,7 +1459,7 @@ index 0000000..d49206c
 +    }
 +
 +    /** Three stacked wave lines, like the LastWave glyph. */
-+    private fun drawWaves(c: Canvas, x: Float, y: Float) {
++    internal fun drawWaves(c: Canvas, x: Float, y: Float) {
 +        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
 +            color = WHITE
 +            style = Paint.Style.STROKE
@@ -1424,10 +1478,10 @@ index 0000000..d49206c
 +}
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt
 new file mode 100644
-index 0000000..cb07a2f
+index 0000000..da5bb1b
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt
-@@ -0,0 +1,602 @@
+@@ -0,0 +1,613 @@
 +package com.lastwave.app.ui.replay
 +
 +import android.graphics.Bitmap
@@ -1518,6 +1572,7 @@ index 0000000..cb07a2f
 +    val scope = rememberCoroutineScope()
 +    var showStories by remember { mutableStateOf(false) }
 +    var poster by remember { mutableStateOf<Bitmap?>(null) }
++    var posterName by remember { mutableStateOf("poster") }
 +    var rendering by remember { mutableStateOf(false) }
 +    var showSync by remember { mutableStateOf(false) }
 +    val syncStatus by viewModel.syncStatus.collectAsStateWithLifecycle()
@@ -1525,15 +1580,24 @@ index 0000000..cb07a2f
 +
 +    // Builds the 1080x1920 picture for whatever period is on screen, then
 +    // opens the share sheet.
-+    fun requestShare() {
++    // With no [page] this is the full "Share my Replay" poster; with a page it
++    // is that one story card as its own picture.
++    fun requestShare(page: StoryPage? = null) {
 +        val current = summary ?: return
 +        if (rendering || state.loading) return
 +        rendering = true
 +        val period = state.period
 +        scope.launch {
-+            val bitmap = runCatching { ReplayPoster.render(context, current, period) }.getOrNull()
++            val bitmap = runCatching {
++                if (page == null) {
++                    ReplayPoster.render(context, current, period)
++                } else {
++                    ReplayStoryCards.render(context, current, period, page)
++                }
++            }.getOrNull()
 +            rendering = false
 +            if (bitmap != null) {
++                posterName = page?.name?.lowercase() ?: "poster"
 +                poster = bitmap
 +            } else {
 +                Toast.makeText(context, "Couldn't create the picture", Toast.LENGTH_SHORT).show()
@@ -1643,7 +1707,7 @@ index 0000000..cb07a2f
 +                period = state.period,
 +                paused = poster != null || rendering,
 +                onClose = { showStories = false },
-+                onShare = { requestShare() },
++                onShare = { page -> requestShare(page) },
 +            )
 +        }
 +    }
@@ -1664,6 +1728,7 @@ index 0000000..cb07a2f
 +        ReplayShareSheet(
 +            poster = bitmap,
 +            period = state.period,
++            name = posterName,
 +            onDismiss = { poster = null },
 +        )
 +    }
@@ -2032,10 +2097,10 @@ index 0000000..cb07a2f
 +}
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayShare.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayShare.kt
 new file mode 100644
-index 0000000..4a79b5b
+index 0000000..5a78b0d
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayShare.kt
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,164 @@
 +package com.lastwave.app.ui.replay
 +
 +import android.content.ActivityNotFoundException
@@ -2082,13 +2147,13 @@ index 0000000..4a79b5b
 +
 +private const val INSTAGRAM_PACKAGE = "com.instagram.android"
 +
-+private fun fileName(period: ReplayPeriod): String =
-+    "lastwave-replay-${period.name.lowercase()}-${LocalDate.now()}.png"
++private fun fileName(period: ReplayPeriod, name: String): String =
++    "lastwave-replay-${period.name.lowercase()}-$name-${LocalDate.now()}.png"
 +
 +/** Writes the picture into the cache folder the app's FileProvider already exposes. */
-+private fun cacheUri(context: Context, poster: Bitmap, period: ReplayPeriod): Uri {
++private fun cacheUri(context: Context, poster: Bitmap, period: ReplayPeriod, name: String): Uri {
 +    val dir = File(context.cacheDir, "shared").apply { mkdirs() }
-+    val file = File(dir, fileName(period))
++    val file = File(dir, fileName(period, name))
 +    file.outputStream().use { poster.compress(Bitmap.CompressFormat.PNG, 100, it) }
 +    return FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
 +}
@@ -2099,9 +2164,9 @@ index 0000000..4a79b5b
 +    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
 +}
 +
-+private fun saveToPhotos(context: Context, poster: Bitmap, period: ReplayPeriod): Boolean = runCatching {
++private fun saveToPhotos(context: Context, poster: Bitmap, period: ReplayPeriod, name: String): Boolean = runCatching {
 +    val values = ContentValues().apply {
-+        put(MediaStore.Images.Media.DISPLAY_NAME, fileName(period))
++        put(MediaStore.Images.Media.DISPLAY_NAME, fileName(period, name))
 +        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
 +        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/LastWave")
 +        put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -2126,6 +2191,7 @@ index 0000000..4a79b5b
 +    poster: Bitmap,
 +    period: ReplayPeriod,
 +    onDismiss: () -> Unit,
++    name: String = "poster",
 +) {
 +    val context = LocalContext.current
 +    val scope = rememberCoroutineScope()
@@ -2154,7 +2220,7 @@ index 0000000..4a79b5b
 +            Spacer(Modifier.height(6.dp))
 +            SheetButton("Share picture") {
 +                scope.launch {
-+                    val uri = withContext(Dispatchers.IO) { cacheUri(context, poster, period) }
++                    val uri = withContext(Dispatchers.IO) { cacheUri(context, poster, period, name) }
 +                    context.startActivity(
 +                        Intent.createChooser(sendIntent(uri), "Share my Replay")
 +                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
@@ -2163,7 +2229,7 @@ index 0000000..4a79b5b
 +            }
 +            SheetButton("Instagram Story") {
 +                scope.launch {
-+                    val uri = withContext(Dispatchers.IO) { cacheUri(context, poster, period) }
++                    val uri = withContext(Dispatchers.IO) { cacheUri(context, poster, period, name) }
 +                    try {
 +                        context.startActivity(sendIntent(uri).setPackage(INSTAGRAM_PACKAGE))
 +                    } catch (_: ActivityNotFoundException) {
@@ -2173,7 +2239,7 @@ index 0000000..4a79b5b
 +            }
 +            SheetButton("Save to Photos") {
 +                scope.launch {
-+                    val ok = withContext(Dispatchers.IO) { saveToPhotos(context, poster, period) }
++                    val ok = withContext(Dispatchers.IO) { saveToPhotos(context, poster, period, name) }
 +                    Toast.makeText(
 +                        context,
 +                        if (ok) "Saved to Pictures/LastWave" else "Couldn't save the picture",
@@ -2201,10 +2267,10 @@ index 0000000..4a79b5b
 +}
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayStories.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayStories.kt
 new file mode 100644
-index 0000000..7a6ab24
+index 0000000..506db47
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayStories.kt
-@@ -0,0 +1,513 @@
+@@ -0,0 +1,504 @@
 +package com.lastwave.app.ui.replay
 +
 +import androidx.activity.compose.BackHandler
@@ -2267,7 +2333,7 @@ index 0000000..7a6ab24
 +
 +private const val STORY_MS = 6500
 +
-+private enum class StoryPage(val tint: Color) {
++enum class StoryPage(val tint: Color) {
 +    INTRO(Color(0xFF3B2A63)),
 +    MINUTES(Color(0xFF4A3F3B)),
 +    ARTIST(Color(0xFF2E4A24)),
@@ -2289,7 +2355,7 @@ index 0000000..7a6ab24
 +    period: ReplayPeriod,
 +    paused: Boolean,
 +    onClose: () -> Unit,
-+    onShare: () -> Unit,
++    onShare: (StoryPage) -> Unit,
 +) {
 +    BackHandler(onBack = onClose)
 +
@@ -2360,38 +2426,25 @@ index 0000000..7a6ab24
 +            }
 +            Spacer(Modifier.height(22.dp))
 +
++            storyTitleParts(page, summary, period).let { (pre, bold, post) -> StoryTitle(pre, bold, post) }
++
 +            when (page) {
 +                StoryPage.INTRO -> IntroPage(summary)
 +                StoryPage.MINUTES -> MinutesPage(summary)
 +                StoryPage.ARTIST -> FeaturePage(
-+                    title = { StoryTitle(allSpan(period) + ", ", "One artist", " kept coming back.") },
 +                    rows = summary.artists,
 +                    circular = true,
-+                    subtitleOf = { "${formatMinutes(it.ms)} · ${plural(it.plays, "Play")}" },
++                    subtitleOf = { featureSubtitle(StoryPage.ARTIST, it) },
 +                )
 +                StoryPage.SONG -> FeaturePage(
-+                    title = {
-+                        StoryTitle(
-+                            "In total, ",
-+                            plural(summary.distinctSongs, "song"),
-+                            " filled your ${fillSpan(period)}.",
-+                        )
-+                    },
 +                    rows = summary.songs,
 +                    circular = false,
-+                    subtitleOf = {
-+                        listOfNotNull(it.subtitle, "${formatMinutes(it.ms)} · ${plural(it.plays, "Play")}")
-+                            .joinToString("\n")
-+                    },
++                    subtitleOf = { featureSubtitle(StoryPage.SONG, it) },
 +                )
 +                StoryPage.ALBUM -> FeaturePage(
-+                    title = { StoryTitle("This time, ", "One album", " held your attention.") },
 +                    rows = summary.albums,
 +                    circular = false,
-+                    subtitleOf = {
-+                        listOfNotNull(it.subtitle, "${formatMinutes(it.ms)} · ${plural(it.plays, "Play")}")
-+                            .joinToString("\n")
-+                    },
++                    subtitleOf = { featureSubtitle(StoryPage.ALBUM, it) },
 +                )
 +                StoryPage.GENRES -> GenresPage(summary)
 +                StoryPage.EXPLORED -> ExploredPage(summary)
@@ -2420,7 +2473,7 @@ index 0000000..7a6ab24
 +                .size(48.dp)
 +                .clip(CircleShape)
 +                .background(Color.White.copy(alpha = 0.18f))
-+                .clickable(onClick = onShare),
++                .clickable { onShare(page) },
 +            contentAlignment = Alignment.Center,
 +        ) {
 +            Icon(Icons.Filled.Share, contentDescription = "Share", tint = Color.White)
@@ -2471,7 +2524,13 @@ index 0000000..7a6ab24
 +}
 +
 +@Composable
-+private fun Art(url: String?, size: Int, shape: Shape, modifier: Modifier = Modifier) {
++private fun Art(
++    url: String?,
++    size: Int,
++    shape: Shape,
++    modifier: Modifier = Modifier,
++    label: String? = null,
++) {
 +    val base = modifier.size(size.dp).clip(shape)
 +    if (url != null) {
 +        AsyncImage(
@@ -2481,7 +2540,16 @@ index 0000000..7a6ab24
 +            modifier = base,
 +        )
 +    } else {
-+        Box(base.background(Color.White.copy(alpha = 0.14f)))
++        Box(base.background(Color.White.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
++            if (!label.isNullOrBlank()) {
++                Text(
++                    label.first().uppercase(),
++                    color = Color.White,
++                    fontSize = (size / 2.6f).sp,
++                    fontWeight = FontWeight.Bold,
++                )
++            }
++        }
 +    }
 +}
 +
@@ -2516,7 +2584,6 @@ index 0000000..7a6ab24
 +
 +@Composable
 +private fun androidx.compose.foundation.layout.ColumnScope.IntroPage(summary: ReplaySummary) {
-+    StoryTitle("Your ", "Replay", " is ready.")
 +    Spacer(Modifier.height(24.dp))
 +    Collage(summary)
 +    Spacer(Modifier.weight(1f))
@@ -2530,7 +2597,6 @@ index 0000000..7a6ab24
 +
 +@Composable
 +private fun androidx.compose.foundation.layout.ColumnScope.MinutesPage(summary: ReplaySummary) {
-+    StoryTitle("You spent ", "${totalMinutes(summary.totalMs)} minutes", " with music.")
 +    Spacer(Modifier.height(24.dp))
 +    Collage(summary)
 +    Spacer(Modifier.weight(1f))
@@ -2545,17 +2611,15 @@ index 0000000..7a6ab24
 +
 +@Composable
 +private fun androidx.compose.foundation.layout.ColumnScope.FeaturePage(
-+    title: @Composable () -> Unit,
 +    rows: List<ReplayRow>,
 +    circular: Boolean,
 +    subtitleOf: (ReplayRow) -> String,
 +) {
-+    title()
 +    Spacer(Modifier.height(28.dp))
 +    val shape: Shape = if (circular) CircleShape else RoundedCornerShape(10.dp)
 +    rows.firstOrNull()?.let { top ->
 +        Row(verticalAlignment = Alignment.CenterVertically) {
-+            Art(top.artworkUrl, 128, shape)
++            Art(top.artworkUrl, 128, shape, label = top.title)
 +            Spacer(Modifier.width(18.dp))
 +            Column(Modifier.weight(1f)) {
 +                Text(
@@ -2589,7 +2653,7 @@ index 0000000..7a6ab24
 +                fontWeight = FontWeight.Bold,
 +                modifier = Modifier.width(34.dp),
 +            )
-+            Art(row.artworkUrl, 42, if (circular) CircleShape else RoundedCornerShape(6.dp))
++            Art(row.artworkUrl, 42, if (circular) CircleShape else RoundedCornerShape(6.dp), label = row.title)
 +            Spacer(Modifier.width(14.dp))
 +            Text(
 +                row.title,
@@ -2609,7 +2673,6 @@ index 0000000..7a6ab24
 +
 +@Composable
 +private fun androidx.compose.foundation.layout.ColumnScope.GenresPage(summary: ReplaySummary) {
-+    StoryTitle("Together, ", "Your genres", " shaped your sound.")
 +    Spacer(Modifier.weight(1f))
 +    summary.genres.firstOrNull()?.let { top ->
 +        Text(
@@ -2651,11 +2714,6 @@ index 0000000..7a6ab24
 +
 +@Composable
 +private fun androidx.compose.foundation.layout.ColumnScope.ExploredPage(summary: ReplaySummary) {
-+    StoryTitle(
-+        "You explored ",
-+        plural(summary.distinctSongs, "song"),
-+        " from ${plural(summary.distinctArtists, "artist")}.",
-+    )
 +    Spacer(Modifier.weight(1f))
 +    BigStat(summary.distinctAlbums.toString(), "Different albums")
 +    summary.biggestDayLabel?.let {
@@ -2682,7 +2740,6 @@ index 0000000..7a6ab24
 +    summary: ReplaySummary,
 +    period: ReplayPeriod,
 +) {
-+    StoryTitle("Your ", periodNoun(period), " in music.")
 +    Spacer(Modifier.height(28.dp))
 +    SummaryLine("Minutes", totalMinutes(summary.totalMs).toString())
 +    summary.songs.firstOrNull()?.let { SummaryLine("Top song", it.title) }
@@ -2716,6 +2773,303 @@ index 0000000..7a6ab24
 +            overflow = TextOverflow.Ellipsis,
 +            modifier = Modifier.weight(1f),
 +        )
++    }
++}
+diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayStoryCards.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayStoryCards.kt
+new file mode 100644
+index 0000000..e8a496e
+--- /dev/null
++++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayStoryCards.kt
+@@ -0,0 +1,291 @@
++package com.lastwave.app.ui.replay
++
++import android.content.Context
++import android.graphics.Bitmap
++import android.graphics.Canvas
++import android.graphics.LinearGradient
++import android.graphics.Paint
++import android.graphics.Shader
++import android.graphics.Typeface
++import android.text.SpannableStringBuilder
++import android.text.Spanned
++import android.text.StaticLayout
++import android.text.TextPaint
++import android.text.TextUtils
++import android.text.style.ForegroundColorSpan
++import android.text.style.StyleSpan
++import androidx.compose.ui.graphics.toArgb
++import com.lastwave.app.data.repository.ReplayPeriod
++import com.lastwave.app.data.repository.ReplayRow
++import com.lastwave.app.data.repository.ReplaySummary
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.async
++import kotlinx.coroutines.awaitAll
++import kotlinx.coroutines.coroutineScope
++import kotlinx.coroutines.withContext
++
++/**
++ * Draws one story card (a single page of "Play your Replay") as its own
++ * 1080 x 1920 picture, so each card can be shared on its own. The full
++ * "Share my Replay" poster is [ReplayPoster] and is unchanged.
++ */
++internal object ReplayStoryCards {
++    private const val W = 1080
++    private const val H = 1920
++    private const val M = 72f
++    private const val WHITE = 0xFFFFFFFF.toInt()
++    private const val SOFT = 0x9EFFFFFF.toInt()
++    private const val MUTED = 0xB3FFFFFF.toInt()
++    private const val DIM = 0x80FFFFFF.toInt()
++
++    suspend fun render(
++        context: Context,
++        summary: ReplaySummary,
++        period: ReplayPeriod,
++        page: StoryPage,
++    ): Bitmap = withContext(Dispatchers.IO) {
++        val urls = artUrls(page, summary)
++        val art: Map<String, Bitmap?> = coroutineScope {
++            urls.map { url -> async { url to ReplayPoster.load(context, url) } }.awaitAll().toMap()
++        }
++        draw(summary, period, page, art)
++    }
++
++    private fun rowsFor(page: StoryPage, summary: ReplaySummary): List<ReplayRow> = when (page) {
++        StoryPage.ARTIST -> summary.artists
++        StoryPage.SONG -> summary.songs
++        StoryPage.ALBUM -> summary.albums
++        StoryPage.GENRES -> summary.genres
++        else -> emptyList()
++    }
++
++    /** The artwork a card needs, in the same order the on-screen card uses. */
++    private fun collageUrls(summary: ReplaySummary): List<String> =
++        (summary.albums + summary.songs + summary.artists)
++            .mapNotNull { it.artworkUrl }
++            .distinct()
++            .take(5)
++
++    private fun artUrls(page: StoryPage, summary: ReplaySummary): List<String> = when (page) {
++        StoryPage.INTRO, StoryPage.MINUTES -> collageUrls(summary)
++        StoryPage.ARTIST, StoryPage.SONG, StoryPage.ALBUM ->
++            rowsFor(page, summary).take(5).mapNotNull { it.artworkUrl }.distinct()
++        else -> emptyList()
++    }
++
++    private fun draw(
++        summary: ReplaySummary,
++        period: ReplayPeriod,
++        page: StoryPage,
++        art: Map<String, Bitmap?>,
++    ): Bitmap {
++        val bmp = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
++        val c = Canvas(bmp)
++
++        val bg = Paint().apply {
++            shader = LinearGradient(
++                0f, 0f, 0f, H.toFloat(),
++                page.tint.toArgb(), 0xFF0B0A0E.toInt(),
++                Shader.TileMode.CLAMP,
++            )
++        }
++        c.drawRect(0f, 0f, W.toFloat(), H.toFloat(), bg)
++
++        // Header: label on the left, LastWave mark on the right.
++        c.drawText(replayLabel(period), M, 128f, ReplayPoster.text(46f, true, WHITE))
++        val brand = ReplayPoster.text(46f, true, WHITE)
++        val brandX = W - M - brand.measureText("LastWave")
++        c.drawText("LastWave", brandX, 128f, brand)
++        ReplayPoster.drawWaves(c, brandX - 84f, 88f)
++
++        val titleBottom = drawTitle(c, storyTitleParts(page, summary, period), 190f)
++
++        when (page) {
++            StoryPage.INTRO -> {
++                drawCollage(c, collageUrls(summary), art, top = maxOf(titleBottom + 40f, 620f))
++                note(c, "Built privately from your listening history on this device.")
++            }
++            StoryPage.MINUTES -> {
++                drawCollage(c, collageUrls(summary), art, top = maxOf(titleBottom + 40f, 620f))
++                val peak = summary.peakHourLabel?.let { ", mostly around $it" } ?: ""
++                note(c, "Across ${plural(summary.totalPlays, "Play")}$peak.")
++            }
++            StoryPage.ARTIST, StoryPage.SONG, StoryPage.ALBUM -> drawFeature(c, page, summary, art, titleBottom)
++            StoryPage.GENRES -> drawGenres(c, summary, titleBottom)
++            StoryPage.EXPLORED -> drawExplored(c, summary)
++            StoryPage.SUMMARY -> drawSummary(c, summary, period, titleBottom)
++        }
++
++        c.drawText(
++            "Counted on this device with LastWave",
++            M,
++            1880f,
++            ReplayPoster.text(27f, true, 0xFF76767E.toInt()),
++        )
++        return bmp
++    }
++
++    /** Headline with the middle part bold and white. Returns the y it ends at. */
++    private fun drawTitle(c: Canvas, parts: Triple<String, String, String>, top: Float): Float {
++        val (pre, bold, post) = parts
++        val text = SpannableStringBuilder(pre)
++        val start = text.length
++        text.append(bold)
++        val end = text.length
++        text.append(post)
++        text.setSpan(ForegroundColorSpan(WHITE), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
++        text.setSpan(StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
++        val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
++            textSize = 84f
++            color = SOFT
++            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
++        }
++        val layout = StaticLayout.Builder
++            .obtain(text, 0, text.length, paint, (W - 2 * M).toInt())
++            .setLineSpacing(0f, 1.08f)
++            .build()
++        c.save()
++        c.translate(M, top)
++        layout.draw(c)
++        c.restore()
++        return top + layout.height
++    }
++
++    private fun note(c: Canvas, text: String) {
++        val paint = ReplayPoster.text(40f, false, MUTED)
++        c.drawText(ReplayPoster.fit(text, paint, W - 2 * M), M, 1790f, paint)
++    }
++
++    private fun drawCollage(c: Canvas, urls: List<String>, art: Map<String, Bitmap?>, top: Float) {
++        // (x, y offset from top, size, rotation degrees, circular)
++        data class Tile(val x: Float, val y: Float, val size: Float, val rotate: Float, val circle: Boolean)
++        val tiles = listOf(
++            Tile(270f, 330f, 600f, -3f, false),
++            Tile(60f, 120f, 360f, -9f, false),
++            Tile(705f, 0f, 336f, 8f, false),
++            Tile(780f, 450f, 288f, 0f, true),
++            Tile(120f, 690f, 252f, 0f, true),
++        )
++        urls.take(tiles.size).forEachIndexed { i, url ->
++            val t = tiles[i]
++            val y = top + t.y
++            c.save()
++            c.rotate(t.rotate, t.x + t.size / 2f, y + t.size / 2f)
++            ReplayPoster.drawArt(c, art[url], "", t.x, y, t.size, t.circle, 30f)
++            c.restore()
++        }
++    }
++
++    private fun drawFeature(
++        c: Canvas,
++        page: StoryPage,
++        summary: ReplaySummary,
++        art: Map<String, Bitmap?>,
++        titleBottom: Float,
++    ) {
++        val rows = rowsFor(page, summary)
++        val circle = page == StoryPage.ARTIST
++        val top = rows.firstOrNull() ?: return
++        val y = titleBottom + 70f
++        val size = 384f
++        ReplayPoster.drawArt(c, art[top.artworkUrl], top.title, M, y, size, circle, 30f)
++
++        val textX = M + size + 54f
++        val textWidth = W - M - textX
++        val namePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
++            textSize = 84f
++            color = WHITE
++            typeface = Typeface.create("sans-serif", Typeface.BOLD)
++        }
++        val nameLayout = StaticLayout.Builder
++            .obtain(top.title, 0, top.title.length, namePaint, textWidth.toInt())
++            .setMaxLines(3)
++            .setEllipsize(TextUtils.TruncateAt.END)
++            .setLineSpacing(0f, 1.0f)
++            .build()
++        c.save()
++        c.translate(textX, y + 12f)
++        nameLayout.draw(c)
++        c.restore()
++        val sub = ReplayPoster.text(42f, false, MUTED)
++        var lineY = y + 12f + nameLayout.height + 56f
++        for (line in featureSubtitle(page, top).split('\n')) {
++            c.drawText(ReplayPoster.fit(line, sub, textWidth), textX, lineY, sub)
++            lineY += 56f
++        }
++
++        // Ranks 2-5, pinned to the bottom like on screen.
++        val rank = ReplayPoster.text(51f, true, DIM)
++        val title = ReplayPoster.text(51f, true, WHITE)
++        val minutes = ReplayPoster.text(39f, false, MUTED)
++        rows.drop(1).take(4).forEachIndexed { i, row ->
++            val rowTop = 1220f + i * 140f
++            c.drawText(row.rank.toString(), M, rowTop + 80f, rank)
++            ReplayPoster.drawArt(c, art[row.artworkUrl], row.title, M + 102f, rowTop, 126f, circle, 18f)
++            val label = formatMinutes(row.ms)
++            val labelX = W - M - minutes.measureText(label)
++            c.drawText(label, labelX, rowTop + 76f, minutes)
++            c.drawText(
++                ReplayPoster.fit(row.title, title, labelX - (M + 270f) - 24f),
++                M + 270f,
++                rowTop + 82f,
++                title,
++            )
++        }
++    }
++
++    private fun drawGenres(c: Canvas, summary: ReplaySummary, titleBottom: Float) {
++        val top = summary.genres.firstOrNull() ?: return
++        val big = ReplayPoster.text(192f, true, WHITE)
++        val bigY = maxOf(titleBottom + 360f, 1000f)
++        c.drawText(ReplayPoster.fit(top.title, big, W - 2 * M), M, bigY, big)
++        c.drawText(formatMinutes(top.ms), M, bigY + 66f, ReplayPoster.text(48f, false, MUTED))
++
++        val rank = ReplayPoster.text(51f, true, DIM)
++        val name = ReplayPoster.text(54f, true, WHITE)
++        val minutes = ReplayPoster.text(42f, false, MUTED)
++        summary.genres.drop(1).take(4).forEachIndexed { i, row ->
++            val baseline = 1330f + i * 120f
++            c.drawText(row.rank.toString(), M, baseline, rank)
++            val label = formatMinutes(row.ms)
++            val labelX = W - M - minutes.measureText(label)
++            c.drawText(label, labelX, baseline, minutes)
++            c.drawText(ReplayPoster.fit(row.title, name, labelX - (M + 102f) - 24f), M + 102f, baseline, name)
++        }
++    }
++
++    private fun drawExplored(c: Canvas, summary: ReplaySummary) {
++        val value = ReplayPoster.text(102f, true, WHITE)
++        val label = ReplayPoster.text(42f, false, MUTED)
++        val stats = buildList {
++            add(summary.distinctAlbums.toString() to "Different albums")
++            summary.biggestDayLabel?.let {
++                add(it to "Your biggest day: ${formatMinutes(summary.biggestDayMs)}")
++            }
++            summary.peakHourLabel?.let { add(it to "When you listen the most") }
++        }
++        val first = 1740f - (stats.size - 1) * 250f - 60f
++        stats.forEachIndexed { i, (v, l) ->
++            val y = first + i * 250f
++            c.drawText(ReplayPoster.fit(v, value, W - 2 * M), M, y, value)
++            c.drawText(ReplayPoster.fit(l, label, W - 2 * M), M, y + 58f, label)
++        }
++    }
++
++    private fun drawSummary(c: Canvas, summary: ReplaySummary, period: ReplayPeriod, titleBottom: Float) {
++        val key = ReplayPoster.text(42f, false, DIM)
++        val value = ReplayPoster.text(51f, true, WHITE)
++        val lines = buildList {
++            add("Minutes" to totalMinutes(summary.totalMs).toString())
++            summary.songs.firstOrNull()?.let { add("Top song" to it.title) }
++            summary.artists.firstOrNull()?.let { add("Top artist" to it.title) }
++            summary.albums.firstOrNull()?.let { add("Top album" to it.title) }
++            summary.genres.firstOrNull()?.let { add("Top genre" to it.title) }
++        }
++        lines.forEachIndexed { i, (k, v) ->
++            val baseline = titleBottom + 140f + i * 128f
++            c.drawText(k, M, baseline, key)
++            c.drawText(ReplayPoster.fit(v, value, W - M - (M + 300f)), M + 300f, baseline, value)
++        }
 +    }
 +}
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplaySyncSheet.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplaySyncSheet.kt
@@ -2986,10 +3340,10 @@ index 0000000..fe73c30
 +    }
 +}
 diff --git a/app/src/main/java/com/lastwave/app/ui/shell/MainShell.kt b/app/src/main/java/com/lastwave/app/ui/shell/MainShell.kt
-index 1ff4995..220031f 100644
+index 81b7563..e5ef034 100644
 --- a/app/src/main/java/com/lastwave/app/ui/shell/MainShell.kt
 +++ b/app/src/main/java/com/lastwave/app/ui/shell/MainShell.kt
-@@ -221,6 +221,7 @@ fun MainShell(
+@@ -233,6 +233,7 @@ fun MainShell(
      onOpenSearch: () -> Unit,
      onOpenDiscover: () -> Unit,
      onOpenGenres: () -> Unit,
@@ -2997,7 +3351,7 @@ index 1ff4995..220031f 100644
      onOpenFriends: () -> Unit,
      onOpenFriendProfile: (username: String, displayName: String?, avatarUrl: String?) -> Unit = { _, _, _ -> },
      onOpenFeedPlaylist: (String) -> Unit,
-@@ -374,6 +375,7 @@ fun MainShell(
+@@ -404,6 +405,7 @@ fun MainShell(
                          onOpenSearch = onOpenSearch,
                          onOpenDiscover = onOpenDiscover,
                          onOpenGenres = onOpenGenres,
