@@ -197,8 +197,6 @@ data class MiscSettings(
     val canvasGradientBlurEnabled: Boolean = false,
     /** When true, canvas video loops may be fetched over cellular data. */
     val canvasOverCellular: Boolean = true,
-    /** When true, anonymous listening telemetry connects to the LastWave Live Global Map. */
-    val liveTelemetryEnabled: Boolean = true,
     /** When true, a liked song is also marked as liked on YouTube Music. */
     val likedSongsYouTubeSync: Boolean = true,
     /** When true, a liked song is added to this app's own Liked Songs playlist. */
@@ -216,13 +214,65 @@ data class MiscSettings(
     val jamRoomMode: String = "collaborative",
 )
 
+val DEFAULT_SECTION_ORDER: List<String> = listOf(
+    "hero_greeting",
+    "infinite_radio",
+    "quick_tiles",
+    "taste_strip",
+    "discover_new_music",
+    "quick_picks",
+    "because_you_listen_to",
+    "fresh_finds",
+    "yt:Fresh finds, old favorites",
+    "yt:Listen again",
+    "jump_back_in",
+    "yt:Forgotten favorites",
+    "yt:Listen together",
+    "yt:Mixes to explore",
+    "spotlight_hero",
+    "top_artists",
+    "yt:Favourite to revisit",
+    "heavy_rotation",
+    "albums_in_rotation",
+    "yt:Album for you",
+    "new_releases",
+    "yt:Cover and remixes",
+    "yt:Recaps",
+    "yt:Albums for you",
+    "trending_charts",
+    "yt:From the community",
+    "yt:Heard in shorts",
+    "yt:From your library",
+    "mixed_for_you",
+    "yt:Your daily discover",
+    "yt:Featured playlist for you",
+    "yt:Live performances",
+    "friends_activity",
+    "podcast_shelf",
+    "yt:Similar to",
+    "yt:Music video for you",
+    "yt:Trending songs for you",
+    "yt:Energy boosters",
+    "yt:Feel good",
+    "yt:Workout",
+    "yt:Relax",
+    "yt:Focus",
+    "yt:Commute",
+    "yt:Party",
+    "yt:Romance",
+    "yt:Sleep",
+)
+
 /** Toggleable sections of the Home tab (see FeedScreen). Hero greeting and
  *  footer are structural; everything listed here can be hidden by the user.
  *  Titles are string resources so HomeSectionsScreen follows the app language. */
 enum class HomeSection(val id: String, val titleRes: Int, val subtitleRes: Int) {
     HERO("hero", com.lastwave.app.R.string.home_section_hero_title, com.lastwave.app.R.string.home_section_hero_sub),
+    HERO_GREETING("hero_greeting", com.lastwave.app.R.string.home_section_greeting_title, com.lastwave.app.R.string.home_section_greeting_sub),
+    INFINITE_RADIO("infinite_radio", com.lastwave.app.R.string.home_section_infinite_radio_title, com.lastwave.app.R.string.home_section_infinite_radio_sub),
     QUICK_TILES("quick_tiles", com.lastwave.app.R.string.home_section_quick_tiles_title, com.lastwave.app.R.string.home_section_quick_tiles_sub),
     TASTE_STRIP("taste_strip", com.lastwave.app.R.string.home_section_taste_strip_title, com.lastwave.app.R.string.home_section_taste_strip_sub),
+    DISCOVER_NEW_MUSIC("discover_new_music", com.lastwave.app.R.string.home_section_discover_title, com.lastwave.app.R.string.home_section_discover_sub),
     QUICK_PICKS("quick_picks", com.lastwave.app.R.string.home_section_quick_picks_title, com.lastwave.app.R.string.home_section_quick_picks_sub),
     BECAUSE_YOU_LISTEN_TO("because_you_listen_to", com.lastwave.app.R.string.home_section_because_title, com.lastwave.app.R.string.home_section_because_sub),
     FRESH_FINDS("fresh_finds", com.lastwave.app.R.string.home_section_fresh_title, com.lastwave.app.R.string.home_section_fresh_sub),
@@ -234,7 +284,8 @@ enum class HomeSection(val id: String, val titleRes: Int, val subtitleRes: Int) 
     ALBUMS("albums_in_rotation", com.lastwave.app.R.string.home_section_albums_title, com.lastwave.app.R.string.home_section_albums_sub),
     CHARTS("trending_charts", com.lastwave.app.R.string.home_section_charts_title, com.lastwave.app.R.string.home_section_charts_sub),
     NEW_RELEASES("new_releases", com.lastwave.app.R.string.home_section_releases_title, com.lastwave.app.R.string.home_section_releases_sub),
-    FRIENDS("friends_activity", com.lastwave.app.R.string.home_section_friends_title, com.lastwave.app.R.string.home_section_friends_sub);
+    FRIENDS("friends_activity", com.lastwave.app.R.string.home_section_friends_title, com.lastwave.app.R.string.home_section_friends_sub),
+    PODCASTS("podcast_shelf", com.lastwave.app.R.string.home_section_podcasts_title, com.lastwave.app.R.string.home_section_podcasts_sub);
 
     companion object {
         fun fromId(id: String?): HomeSection? =
@@ -341,7 +392,6 @@ class SettingsPreferences @Inject constructor(
         val CANVAS_FULL_BLEED = booleanPreferencesKey("lw_canvas_full_bleed")
         val CANVAS_GRADIENT_BLUR_ENABLED = booleanPreferencesKey("lw_canvas_gradient_blur_enabled")
         val CANVAS_OVER_CELLULAR = booleanPreferencesKey("lw_canvas_over_cellular")
-        val LIVE_TELEMETRY_ENABLED = booleanPreferencesKey("lw_live_telemetry_enabled")
         val LIKED_SONGS_YOUTUBE_SYNC = booleanPreferencesKey("lw_liked_songs_youtube_sync")
         val LIKED_SONGS_LOCAL_SYNC = booleanPreferencesKey("lw_liked_songs_local_sync")
         val LIKED_SONGS_LOCAL_ONLY = stringPreferencesKey("lw_liked_songs_local_only")
@@ -420,9 +470,7 @@ class SettingsPreferences @Inject constructor(
                 downloadStructure = DownloadFolderStructure.fromId(p.readSafely(Keys.DOWNLOAD_STRUCTURE)),
                 useAlbumArtistForFolders = p.readSafely(Keys.USE_ALBUM_ARTIST_FOLDERS) ?: true,
                 primaryArtistOnly = p.readSafely(Keys.PRIMARY_ARTIST_ONLY) ?: true,
-                hiddenHomeSections = p.readSafely(Keys.HIDDEN_HOME_SECTIONS)
-                    ?.filter { id -> HomeSection.entries.any { it.id == id } }?.toSet()
-                    ?: emptySet(),
+                hiddenHomeSections = p.readSafely(Keys.HIDDEN_HOME_SECTIONS) ?: emptySet(),
                 ytMusicHiddenSections = p.readSafely(Keys.YT_MUSIC_HIDDEN_SECTIONS) ?: emptySet(),
                 ytMusicSectionsOrder = p.readSafely(Keys.YT_MUSIC_SECTIONS_ORDER)?.split("|||")?.filter { it.isNotBlank() } ?: emptyList(),
                 homeSectionsOrder = p.readSafely(Keys.HOME_SECTIONS_ORDER)?.split("|||")?.filter { it.isNotBlank() } ?: emptyList(),
@@ -435,7 +483,6 @@ class SettingsPreferences @Inject constructor(
                 canvasFullBleed = p.readSafely(Keys.CANVAS_FULL_BLEED) ?: true,
                 canvasGradientBlurEnabled = p.readSafely(Keys.CANVAS_GRADIENT_BLUR_ENABLED) ?: false,
                 canvasOverCellular = p.readSafely(Keys.CANVAS_OVER_CELLULAR) ?: true,
-                liveTelemetryEnabled = p.readSafely(Keys.LIVE_TELEMETRY_ENABLED) ?: true,
                 likedSongsYouTubeSync = p.readSafely(Keys.LIKED_SONGS_YOUTUBE_SYNC) ?: true,
                 likedSongsLocalSync = p.readSafely(Keys.LIKED_SONGS_LOCAL_SYNC) ?: true,
                 podcastsEnabled = p.readSafely(Keys.PODCASTS_ENABLED) ?: true,
@@ -799,8 +846,8 @@ class SettingsPreferences @Inject constructor(
     suspend fun saveUniversalHomeSections(order: List<String>, hidden: Set<String>, pinned: Set<String>) {
         dataStore.edit { prefs ->
             prefs[Keys.HOME_SECTIONS_ORDER] = order.joinToString("|||")
-            val inApp = hidden.filter { id -> HomeSection.entries.any { it.id == id } }.toSet()
-            val yt = hidden.filter { id -> id.startsWith("yt:") }.map { it.removePrefix("yt:") }.toSet()
+            val inApp = hidden.filter { !it.startsWith("yt:") }.toSet()
+            val yt = hidden.filter { it.startsWith("yt:") }.map { it.removePrefix("yt:") }.toSet()
             prefs[Keys.HIDDEN_HOME_SECTIONS] = inApp
             prefs[Keys.YT_MUSIC_HIDDEN_SECTIONS] = yt
             prefs[Keys.PINNED_HOME_SECTIONS] = pinned
@@ -815,12 +862,12 @@ class SettingsPreferences @Inject constructor(
             prefs[Keys.PINNED_HOME_SECTIONS] = newPinned
 
             val rawOrder = prefs.readSafely(Keys.HOME_SECTIONS_ORDER)?.split("|||")?.filter { it.isNotBlank() } ?: emptyList()
-            if (!isCurrentlyPinned && rawOrder.isNotEmpty()) {
-                val list = rawOrder.toMutableList()
-                list.remove(sectionKey)
-                list.add(0, sectionKey)
-                prefs[Keys.HOME_SECTIONS_ORDER] = list.joinToString("|||")
+            val baseList = if (rawOrder.isNotEmpty()) rawOrder.toMutableList() else DEFAULT_SECTION_ORDER.toMutableList()
+            if (!isCurrentlyPinned) {
+                baseList.remove(sectionKey)
+                baseList.add(0, sectionKey)
             }
+            prefs[Keys.HOME_SECTIONS_ORDER] = baseList.joinToString("|||")
         }
     }
 
@@ -891,10 +938,6 @@ class SettingsPreferences @Inject constructor(
 
     suspend fun setCanvasOverCellular(enabled: Boolean) {
         dataStore.edit { it[Keys.CANVAS_OVER_CELLULAR] = enabled }
-    }
-
-    suspend fun setLiveTelemetryEnabled(enabled: Boolean) {
-        dataStore.edit { it[Keys.LIVE_TELEMETRY_ENABLED] = enabled }
     }
 
     /** Whether a liked song is added to this app's own Liked Songs playlist. */
