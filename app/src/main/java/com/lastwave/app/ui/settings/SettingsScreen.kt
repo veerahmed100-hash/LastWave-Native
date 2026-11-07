@@ -21,6 +21,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Vibration
+import com.lastwave.app.data.local.musicHapticsConfig
+import com.lastwave.app.playback.haptics.MusicHapticsConfig
+import com.lastwave.app.playback.haptics.MusicHapticsEngineMode
+import com.lastwave.app.playback.haptics.MusicHapticsIntensity
+import com.lastwave.app.playback.haptics.MusicHapticsMode
+import com.lastwave.app.ui.player.QualityGlyphs
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Search
@@ -102,6 +109,8 @@ import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FilterTiltShift
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Apps
@@ -116,6 +125,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Waves
 import com.lastwave.app.data.local.LyricsProvider
+import com.lastwave.app.data.local.RecommendationSource
 import com.lastwave.app.ui.player.LyricsOffsetDialog
 import com.lastwave.app.ui.player.LyricsSizeDialog
 import androidx.compose.material.icons.filled.FormatSize
@@ -136,6 +146,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.SmartDisplay
+import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.QueueMusic
@@ -552,6 +563,7 @@ fun SettingsScreen(
     var showYtChannelSheet by remember { mutableStateOf(false) }
     var showYtDisconnectConfirm by remember { mutableStateOf(false) }
     var showSpotifyDisconnectConfirm by remember { mutableStateOf(false) }
+    var showRecommendationSourceDialog by remember { mutableStateOf(false) }
     var showCookieLoginDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
     var showJamSheet by remember { mutableStateOf(false) }
@@ -976,6 +988,53 @@ fun SettingsScreen(
                         }
                         add { position ->
                             SettingsToggleCard(
+                                icon = QualityGlyphs.MusicHaptics,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                title = "Music Haptics",
+                                subtitle = if (misc.musicHapticsEnabled) {
+                                    "${misc.musicHapticsMode.label} \u2022 ${misc.musicHapticsIntensity.label} intensity"
+                                } else {
+                                    "Physical rhythm synchronization via phone's haptic motor"
+                                },
+                                checked = misc.musicHapticsEnabled,
+                                onCheckedChange = viewModel::setMusicHapticsEnabled,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "audio.music_haptics"),
+                            )
+                        }
+                        if (misc.musicHapticsEnabled) {
+                            add { position ->
+                                MusicHapticsControlsCard(
+                                    config = misc.musicHapticsConfig,
+                                    isHardwareAvailable = viewModel.isHardwareHapticGeneratorAvailable,
+                                    isUsbExclusiveActive = viewModel.isUsbExclusiveActive,
+                                    onModeChange = viewModel::setMusicHapticsMode,
+                                    onIntensityChange = viewModel::setMusicHapticsIntensity,
+                                    onEngineModeChange = viewModel::setMusicHapticsEngineMode,
+                                    onBatterySaverChange = viewModel::setMusicHapticsPauseOnBatterySaver,
+                                    position = position,
+                                )
+                            }
+                        }
+                        add { position ->
+                            SettingsToggleCard(
+                                icon = Icons.Filled.GraphicEq,
+                                iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                title = "Autoplay similar songs",
+                                subtitle = if (misc.autoplaySimilarEnabled) {
+                                    "When the queue ends, keep playing similar songs"
+                                } else {
+                                    "Stop when the queue ends; nothing is added automatically"
+                                },
+                                checked = misc.autoplaySimilarEnabled,
+                                onCheckedChange = viewModel::setAutoplaySimilarEnabled,
+                                position = position,
+                            )
+                        }
+                        add { position ->
+                            SettingsToggleCard(
                                 icon = Icons.Filled.GraphicEq,
                                 iconContainer = MaterialTheme.colorScheme.secondaryContainer,
                                 iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1014,6 +1073,23 @@ fun SettingsScreen(
                                 onCheckedChange = viewModel::setKeepLyricsScreenAwake,
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.keep_lyrics_screen_awake"),
+                            )
+                        }
+                        add { position ->
+                            SettingsToggleCard(
+                                icon = Icons.Filled.StopCircle,
+                                iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                title = stringResource(R.string.settings_stop_on_recents),
+                                subtitle = if (misc.stopPlaybackOnTaskRemoved) {
+                                    stringResource(R.string.settings_stop_on_recents_on)
+                                } else {
+                                    stringResource(R.string.settings_stop_on_recents_off)
+                                },
+                                checked = misc.stopPlaybackOnTaskRemoved,
+                                onCheckedChange = viewModel::setStopPlaybackOnTaskRemoved,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "audio.stop_on_recents"),
                             )
                         }
                         add { position ->
@@ -1063,7 +1139,7 @@ fun SettingsScreen(
                         LoudnessMode.ALBUM -> "Album \u2022 Keep intentional album dynamics"
                         else -> "Off \u2022 Play tagged tracks at original level"
                     }
-                    SettingsGroup(rowCount = 10) { index, position ->
+                    SettingsGroup(rowCount = 11) { index, position ->
                         when (index) {
                             0 -> SettingsToggleCard(
                                 icon = Icons.Filled.Usb,
@@ -1219,6 +1295,17 @@ fun SettingsScreen(
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "audio.autoeq"),
                             )
+                            10 -> SettingsToggleCard(
+                                icon = Icons.Filled.Tune,
+                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                title = "Show Auto EQ in volume panel",
+                                subtitle = "Show AutoEQ and Parametric EQ shortcut in Now Playing audio controls sheet",
+                                checked = misc.showAutoEqInVolumePanel,
+                                onCheckedChange = viewModel::setShowAutoEqInVolumePanel,
+                                position = position,
+                                isHighlighted = (highlightedSettingId == "audio.show_autoeq_in_volume_panel"),
+                            )
                         }
                     }
                 }
@@ -1229,7 +1316,7 @@ fun SettingsScreen(
                         item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionLabel(stringResource(R.string.settings_section_appearance))
-                    SettingsGroup(rowCount = 11) { index, position ->
+                    SettingsGroup(rowCount = 10) { index, position ->
                         when (index) {
                             0 -> ThemeModeSelectorCard(
                                 currentThemeMode = theme?.themeMode ?: ThemeMode.SYSTEM,
@@ -1336,18 +1423,6 @@ fun SettingsScreen(
                                 onCheckedChange = viewModel::setUseCustomFont,
                                 position = position,
                                 isHighlighted = (highlightedSettingId == "appearance.app_font"),
-                            )
-                            10 -> SettingsToggleCard(
-                                icon = Icons.Filled.TextFields,
-                                iconContainer = MaterialTheme.colorScheme.primaryContainer,
-                                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                title = "Use Bold Font",
-                                subtitle = "Increase font weight across headings and content throughout the app",
-                                checked = misc.useBoldFont,
-                                enabled = misc.useCustomFont,
-                                onCheckedChange = viewModel::setUseBoldFont,
-                                position = position,
-                                isHighlighted = (highlightedSettingId == "appearance.bold_font"),
                             )
                         }
                     }
@@ -1847,7 +1922,7 @@ fun SettingsScreen(
                                 SectionLabel("Spotify")
                                 val spotifyCanvasEnabled by viewModel.spotifyCanvasEnabled.collectAsStateWithLifecycle()
                                 val spotifyPreferCanvas by viewModel.spotifyPreferCanvas.collectAsStateWithLifecycle()
-                                SettingsGroup(rowCount = if (spotifyConnected) 4 else 3) { index, position ->
+                                SettingsGroup(rowCount = if (spotifyConnected) 5 else 3) { index, position ->
                                     when (index) {
                                         0 -> if (spotifyConnected) {
                                             SpotifyAccountRow(
@@ -1900,7 +1975,40 @@ fun SettingsScreen(
                                             position = position,
                                             isHighlighted = (highlightedSettingId == "spotify.prefer_canvas"),
                                         )
+                                        4 -> SettingsToggleCard(
+                                            icon = Icons.Filled.CloudSync,
+                                            iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                            iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                            title = stringResource(R.string.settings_spotify_live_playlists_title),
+                                            subtitle = stringResource(R.string.settings_spotify_live_playlists_sub),
+                                            checked = misc.spotifyPlaylistsSyncEnabled,
+                                            onCheckedChange = viewModel::setSpotifyPlaylistsSyncEnabled,
+                                            position = position,
+                                            isHighlighted = (highlightedSettingId == "spotify.live_playlists"),
+                                        )
                                     }
+                                }
+                            }
+                        }
+
+                        item {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                SectionLabel(stringResource(R.string.settings_section_recommendations))
+                                SettingsGroup(rowCount = 1) { _, position ->
+                                    SettingsActionCard(
+                                        icon = Icons.Filled.AutoAwesome,
+                                        iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                                        iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        title = stringResource(R.string.settings_recommendations_title),
+                                        subtitle = if (spotifyConnected) {
+                                            "${stringResource(misc.recommendationSource.titleRes)} • ${stringResource(misc.recommendationSource.subtitleRes)}"
+                                        } else {
+                                            stringResource(R.string.settings_recommendations_sub_disconnected)
+                                        },
+                                        onClick = { showRecommendationSourceDialog = true },
+                                        position = position,
+                                        isHighlighted = (highlightedSettingId == "spotify.recommendations"),
+                                    )
                                 }
                             }
                         }
@@ -2401,6 +2509,18 @@ fun SettingsScreen(
         )
     }
 
+    if (showRecommendationSourceDialog) {
+        RecommendationSourceDialog(
+            current = if (spotifyConnected) misc.recommendationSource else RecommendationSource.YOUTUBE_MUSIC,
+            spotifyConnected = spotifyConnected,
+            onSelect = {
+                viewModel.setRecommendationSource(it)
+                showRecommendationSourceDialog = false
+            },
+            onDismiss = { showRecommendationSourceDialog = false },
+        )
+    }
+
     // -- Spotify disconnect confirm --
     if (showSpotifyDisconnectConfirm) {
         AlertDialog(
@@ -2881,7 +3001,7 @@ fun SettingsScreen(
                         val isSelected = misc.losslessQuality == qualityId
                         Surface(
                             onClick = {
-                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.ContextClick)
                                 viewModel.setLosslessQuality(qualityId)
                                 showQualityDialog = false
                             },
@@ -3032,7 +3152,7 @@ fun SettingsScreen(
                         val isSelected = misc.downloadQuality == qualityId
                         Surface(
                             onClick = {
-                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.ContextClick)
                                 viewModel.setDownloadQuality(qualityId)
                                 showDownloadQualityDialog = false
                             },
@@ -3302,6 +3422,11 @@ private fun AppIconSelectorCard(
     isHighlighted: Boolean = false,
 ) {
     val shape = groupShape(position)
+    var isExpanded by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    val arrowRotation by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (isExpanded) 180f else 0f,
+        label = "appIconArrowRotation",
+    )
 
     Card(
         shape = shape,
@@ -3316,7 +3441,13 @@ private fun AppIconSelectorCard(
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { isExpanded = !isExpanded },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 IconBadge(
                     Icons.Filled.Apps,
                     MaterialTheme.colorScheme.primaryContainer,
@@ -3335,51 +3466,67 @@ private fun AppIconSelectorCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                IconButton(onClick = { isExpanded = !isExpanded }) {
+                    Icon(
+                        imageVector = Icons.Filled.KeyboardArrowDown,
+                        contentDescription = if (isExpanded) "Collapse app icons" else "Expand app icons",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.graphicsLayer { rotationZ = arrowRotation },
+                    )
+                }
             }
-            Spacer(Modifier.height(14.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceAround,
-                verticalAlignment = Alignment.CenterVertically,
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut(),
             ) {
-                AppIcon.entries.forEach { icon ->
-                    val isSelected = (icon == currentIcon)
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(14.dp))
-                            .clickable { onSelectAppIcon(icon) }
-                            .padding(vertical = 6.dp, horizontal = 4.dp),
+                Column {
+                    Spacer(Modifier.height(14.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceAround,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(52.dp)
-                                .clip(CircleShape)
-                                .background(colorResource(icon.backgroundRes))
-                                .then(
-                                    if (isSelected) {
-                                        Modifier.border(2.5.dp, MaterialTheme.colorScheme.primary, CircleShape)
-                                    } else {
-                                        Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f), CircleShape)
-                                    }
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                painter = painterResource(icon.logoRes),
-                                contentDescription = stringResource(icon.titleRes),
-                                tint = Color.Unspecified,
-                                modifier = Modifier.size(52.dp),
-                            )
+                        AppIcon.entries.forEach { icon ->
+                            val isSelected = (icon == currentIcon)
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onSelectAppIcon(icon) }
+                                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(52.dp)
+                                        .clip(CircleShape)
+                                        .background(colorResource(icon.backgroundRes))
+                                        .then(
+                                            if (isSelected) {
+                                                Modifier.border(2.5.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                                            } else {
+                                                Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f), CircleShape)
+                                            }
+                                        ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        painter = painterResource(icon.logoRes),
+                                        contentDescription = stringResource(icon.titleRes),
+                                        tint = Color.Unspecified,
+                                        modifier = Modifier.size(52.dp),
+                                    )
+                                }
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = stringResource(icon.titleRes),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    textAlign = TextAlign.Center,
+                                )
+                            }
                         }
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = stringResource(icon.titleRes),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                            textAlign = TextAlign.Center,
-                        )
                     }
                 }
             }
@@ -3867,6 +4014,12 @@ private fun AutoMixControlsCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                IconBadge(
+                    icon = Icons.Filled.FilterTiltShift,
+                    container = MaterialTheme.colorScheme.tertiaryContainer,
+                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+                Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     Text("DJ Spectral Filter Sweeps", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                     Text("3-band Linkwitz-Riley sub-bass swap and resonant filter sweeps", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -3879,6 +4032,204 @@ private fun AutoMixControlsCard(
         }
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MusicHapticsControlsCard(
+    config: MusicHapticsConfig,
+    isHardwareAvailable: Boolean,
+    isUsbExclusiveActive: Boolean,
+    onModeChange: (MusicHapticsMode) -> Unit,
+    onIntensityChange: (MusicHapticsIntensity) -> Unit,
+    onEngineModeChange: (MusicHapticsEngineMode) -> Unit,
+    onBatterySaverChange: (Boolean) -> Unit,
+    position: GroupPosition = GroupPosition.SINGLE,
+) {
+    val shape = groupShape(position)
+
+    Card(
+        shape = shape,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+            if (isUsbExclusiveActive) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f),
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(Icons.Filled.Info, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text(
+                            text = "Paused while Bit-Perfect USB DAC bypass is active",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+
+            // 1. Mode Selector Chips
+            Text(
+                text = "Haptic Mode",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                MusicHapticsMode.entries.forEach { mode ->
+                    val isSelected = config.mode == mode
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onModeChange(mode) },
+                        label = {
+                            Text(
+                                mode.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Text(
+                text = config.mode.subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp, bottom = 12.dp),
+            )
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            Spacer(Modifier.height(12.dp))
+
+            // 2. Intensity Segmented Button Chips
+            Text(
+                text = "Vibration Intensity",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                MusicHapticsIntensity.entries.forEach { intensity ->
+                    val isSelected = config.intensity == intensity
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onIntensityChange(intensity) },
+                        label = {
+                            Text(
+                                intensity.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Text(
+                text = when (config.intensity) {
+                    MusicHapticsIntensity.LIGHT -> "Subtle 35% pulse for relaxed listening"
+                    MusicHapticsIntensity.MEDIUM -> "Balanced 65% pulse tuned for standard rhythm"
+                    MusicHapticsIntensity.STRONG -> "Full 100% kick for heavy bass drops & transients"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp, bottom = 12.dp),
+            )
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            Spacer(Modifier.height(12.dp))
+
+            // 3. Engine Routing Selector
+            Text(
+                text = "Engine Routing",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                MusicHapticsEngineMode.entries.forEach { engine ->
+                    val isSelected = config.engineMode == engine
+                    val isEnabled = engine != MusicHapticsEngineMode.HARDWARE_NATIVE || isHardwareAvailable
+                    FilterChip(
+                        selected = isSelected,
+                        enabled = isEnabled,
+                        onClick = { onEngineModeChange(engine) },
+                        label = {
+                            Text(
+                                when (engine) {
+                                    MusicHapticsEngineMode.AUTO -> "Auto"
+                                    MusicHapticsEngineMode.DSP_PRECISION -> "DSP"
+                                    MusicHapticsEngineMode.HARDWARE_NATIVE -> "Hardware"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            val engineDesc = when (config.engineMode) {
+                MusicHapticsEngineMode.AUTO -> if (isHardwareAvailable) "Hardware HapticGenerator for Whole Song; DSP for filtered modes" else "Precision Media3 DSP engine active"
+                MusicHapticsEngineMode.DSP_PRECISION -> "Precision Media3 transient analyzer (consistent across all devices)"
+                MusicHapticsEngineMode.HARDWARE_NATIVE -> if (isHardwareAvailable) "Android 12+ hardware HapticGenerator coupled to audio HAL" else "Unavailable on this hardware (falling back to DSP)"
+            }
+            Text(
+                text = engineDesc,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp, bottom = 12.dp),
+            )
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            Spacer(Modifier.height(12.dp))
+
+            // 4. Battery Saver Toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Pause on Battery Saver",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        "Preserves battery when Android Power Saver is active",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = config.pauseOnBatterySaver,
+                    onCheckedChange = onBatterySaverChange,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun SettingsActionCard(
     icon: ImageVector,
@@ -5352,7 +5703,7 @@ private fun EqualizerSheet(
 
                 TextButton(
                     onClick = {
-                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.ContextClick)
                         onPickPreset(EqualizerPresets.FLAT.name)
                     },
                     enabled = eq.enabled,
@@ -5457,7 +5808,7 @@ private fun EqualizerSheet(
                     Switch(
                         checked = eq.enabled,
                         onCheckedChange = { enabled ->
-                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                            haptic.performHapticFeedback(if (enabled) androidx.compose.ui.hapticfeedback.HapticFeedbackType.ToggleOn else androidx.compose.ui.hapticfeedback.HapticFeedbackType.ToggleOff)
                             onSetEnabled(enabled)
                         },
                     )
@@ -5481,7 +5832,7 @@ private fun EqualizerSheet(
                     FilterChip(
                         selected = eq.presetName.equals(preset.name, ignoreCase = true),
                         onClick = {
-                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.ContextClick)
                             onPickPreset(preset.name)
                         },
                         label = { Text(preset.name, style = MaterialTheme.typography.labelMedium) },
@@ -5892,7 +6243,7 @@ private fun YouTubeChannelSheet(
                                 channel.pageId == selectedPageId
                             Surface(
                                 onClick = {
-                                    haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                    haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.ContextClick)
                                     if (!isSelected) onSelect(channel)
                                 },
                                 shape = RoundedCornerShape(16.dp),
@@ -5989,7 +6340,7 @@ private fun YouTubeLibraryVisibilitySheet(
                 }
                 TextButton(
                     onClick = {
-                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.ContextClick)
                         onSetAllVisible(!allShown)
                     },
                 ) {
@@ -6125,7 +6476,7 @@ private fun SyncPlaylistsSheet(
 
                 TextButton(
                     onClick = {
-                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.ContextClick)
                         onSelectAll(!allSelected)
                     },
                 ) {
@@ -6323,26 +6674,82 @@ private fun LyricsAutoHideDialog(
 }
 
 @Composable
+private fun RecommendationSourceDialog(
+    current: RecommendationSource,
+    spotifyConnected: Boolean,
+    onSelect: (RecommendationSource) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.settings_recommendations_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    stringResource(R.string.settings_recommendations_dialog_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                RecommendationSource.entries.forEach { source ->
+                    val needsSpotify = source == RecommendationSource.SPOTIFY && !spotifyConnected
+                    SettingsRadioOption(
+                        label = stringResource(source.titleRes),
+                        selected = source == current,
+                        onClick = { if (!needsSpotify) onSelect(source) },
+                        enabled = !needsSpotify,
+                        subtitle = if (needsSpotify) {
+                            stringResource(R.string.settings_recommendations_connect_first)
+                        } else {
+                            stringResource(source.subtitleRes)
+                        },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_done)) }
+        },
+    )
+}
+
+@Composable
 private fun SettingsRadioOption(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
+    enabled: Boolean = true,
+    subtitle: String? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .clickable { onClick() }
+            .clickable(enabled = enabled) { onClick() }
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RadioButton(selected = selected, onClick = onClick)
+        RadioButton(selected = selected, onClick = onClick, enabled = enabled)
         Spacer(Modifier.width(8.dp))
-        Text(
-            label,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+            subtitle?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
