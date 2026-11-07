@@ -56,12 +56,23 @@ android {
         return ""
     }
 
+    // vivo Origin Island / music widget build: `-PvivoOrigin=true`.
+    // OriginOS only follows apps whose package name is on vivo's own
+    // allowlist (a system setting no app can write), so this ships the same
+    // app under an allowlisted package. It installs as a separate app, cannot
+    // sit next to that package's real app, and keeps its own data.
+    // The list differs by OriginOS version/region: com.spotify.music is missing
+    // on many phones, while com.tencent.qqmusic is user-confirmed to show on the
+    // island and is almost never already installed outside China.
+    val vivoOrigin = (project.findProperty("vivoOrigin") as? String)?.toBoolean() == true
+
     defaultConfig {
-        applicationId = "com.lastwave.app"
+        applicationId = if (vivoOrigin) "com.tencent.qqmusic" else "com.lastwave.app"
+        buildConfigField("boolean", "VIVO_ORIGIN", vivoOrigin.toString())
         minSdk = (project.findProperty("minSdk") as? String)?.toIntOrNull() ?: 29
         targetSdk = 35
-        versionCode = 28
-        versionName = "5.1.0"
+        versionCode = 30
+        versionName = "5.1.2"
 
         (project.findProperty("targetAbis") as? String)?.let { prop ->
             ndk {

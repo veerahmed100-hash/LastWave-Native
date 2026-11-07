@@ -55,6 +55,8 @@ data class ThemeUiState(
     val liquidGlass: Boolean = true,
     val md3NavBar: Boolean = false,
     val hideNavTabs: Boolean = false,
+    /** Haptic feedback on taps, buttons, toggles and gestures (Settings toggle). */
+    val uiHaptics: Boolean = true,
     /** True when the "Dynamic Now Playing" artwork override is currently
      *  driving the schemes. LastWaveTheme uses this so S+ system dynamic
      *  (wallpaper) only takes over when no now-playing color is active:
@@ -267,6 +269,7 @@ class ThemeRepository @Inject constructor(
             liquidGlass = isGlass,
             md3NavBar = prefs.md3NavBar,
             hideNavTabs = prefs.hideNavTabs,
+            uiHaptics = prefs.uiHaptics,
             isNowPlayingThemed = nowPlayingActive,
             isLastWaveTheme = isLastWave,
             appIcon = prefs.appIcon,
@@ -302,6 +305,12 @@ class ThemeRepository @Inject constructor(
         AppIconManager.applyIcon(context, icon)
     }
 
+    /** Startup heal: leaves exactly the saved icon's launcher alias enabled. */
+    suspend fun reconcileAppIcon() {
+        val icon = themePreferences.prefs.first().appIcon
+        AppIconManager.reconcile(context, icon)
+    }
+
     /** Manual pick always leaves DYNAMIC/MONOCHROME: choosing your own accent
      *  turns Dynamic Color off itself (ThemePreferences persists MANUAL). */
     suspend fun setManualAccent(color: Color) {
@@ -320,6 +329,7 @@ class ThemeRepository @Inject constructor(
 
     suspend fun setMd3NavBar(enabled: Boolean) = themePreferences.setMd3NavBar(enabled)
     suspend fun setHideNavTabs(enabled: Boolean) = themePreferences.setHideNavTabs(enabled)
+    suspend fun setUiHaptics(enabled: Boolean) = themePreferences.setUiHaptics(enabled)
 
     /** Turning this on used to just flip the DataStore flag and wait for
      *  Home's own poll loop to eventually call updateNowPlayingArtwork() —

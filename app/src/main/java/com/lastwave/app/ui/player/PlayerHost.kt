@@ -1340,6 +1340,18 @@ private fun MiniPlayer(
 ) {
     val context = LocalContext.current
     val track = state.current ?: return
+    // Haptics for every mini-player control and swipe gesture.
+    val miniHaptic = LocalHapticFeedback.current
+    @Suppress("NAME_SHADOWING")
+    val onToggle: () -> Unit = { miniHaptic.performHapticFeedback(HapticFeedbackType.ContextClick); onToggle() }
+    @Suppress("NAME_SHADOWING")
+    val onNext: () -> Unit = { miniHaptic.performHapticFeedback(HapticFeedbackType.ContextClick); onNext() }
+    @Suppress("NAME_SHADOWING")
+    val onPrevious: () -> Unit = { miniHaptic.performHapticFeedback(HapticFeedbackType.ContextClick); onPrevious() }
+    @Suppress("NAME_SHADOWING")
+    val onExpand: () -> Unit = { miniHaptic.performHapticFeedback(HapticFeedbackType.ContextClick); onExpand() }
+    @Suppress("NAME_SHADOWING")
+    val onClose: () -> Unit = { miniHaptic.performHapticFeedback(HapticFeedbackType.GestureEnd); onClose() }
     // MiniPlayer: single glass card sampling sibling feed content.
     // Luminance loop (5x5 avg, 0.3..0.8, tween 500, 1s).
     val liquidGlass = LocalLiquidGlass.current
@@ -2397,18 +2409,22 @@ private fun FullPlayer(
         delay(VIDEO_PRELOAD_DELAY_MS)
         syncedVideoVm.preloadVideo(track.title, track.artist, track.videoId, track.durationMs)
     }
-    val showFullBleed = canvasFullBleedEnabled && !isVideoActive && !isTablet
-    val showSleeveCanvas = isCanvasActive && (!showFullBleed || isTablet) && !isVideoActive
+    // Full bleed works wherever the player uses the single-column layout:
+    // phones and tablets in portrait. Only tablet landscape (two columns,
+    // cover beside the controls) keeps the boxed sleeve.
+    val fullBleedBlocked = isTablet && isLandscape
+    val showFullBleed = canvasFullBleedEnabled && !isVideoActive && !fullBleedBlocked
+    val showSleeveCanvas = isCanvasActive && !showFullBleed && !isVideoActive
     // activeCanvas is the single gate every render branch below keys off, so it also
     // carries the Animated Album Canvas toggle. The ViewModel nulls canvasState
     // asynchronously, so without this a disabled toggle still paints one frame of
     // motion artwork over the cover.
-    val activeCanvas = remember(canvas, showFullBleed, canvasEnabled, isTablet) {
+    val activeCanvas = remember(canvas, showFullBleed, canvasEnabled) {
         if (!canvasEnabled) {
             null
         } else {
             val tall = canvas?.tallUrl
-            if (showFullBleed && !isTablet && canvas != null && !tall.isNullOrBlank()) {
+            if (showFullBleed && canvas != null && !tall.isNullOrBlank()) {
                 canvas.copy(url = tall)
             } else {
                 canvas
@@ -2789,7 +2805,7 @@ private fun FullPlayer(
                             ),
                         ),
                 )
-                if (showFullBleed && !isTablet) {
+                if (showFullBleed) {
                     val isTallCanvas = remember(activeCanvas, canvasAspect, canvasGradientBlurEnabled) {
                         if (canvasGradientBlurEnabled || activeCanvas == null) false
                         else if (canvasAspect > 0f) {
@@ -2801,10 +2817,17 @@ private fun FullPlayer(
                         }
                     }
 
-                    val heroHeight = if (heroBottomPx > 0f) {
-                        with(LocalDensity.current) { heroBottomPx.toDp() }
-                    } else {
-                        with(LocalDensity.current) { (bgHeight * 0.54f).toDp() }
+                    // The hero is the cover's full width, cropped top-aligned. On a
+                    // phone the area above the title is taller than wide, so the
+                    // square cover keeps its whole height. A portrait tablet is
+                    // much wider for its height: that area came out wider than
+                    // tall and cut off the bottom of the cover. Never let the
+                    // hero be shorter than it is wide (capped at 85% of the
+                    // screen) so a square cover fits edge to edge and its lower
+                    // part fades under the title, exactly like on a phone.
+                    val heroHeight = with(LocalDensity.current) {
+                        val measured = if (heroBottomPx > 0f) heroBottomPx else bgHeight * 0.54f
+                        maxOf(measured, minOf(bgWidth, bgHeight * 0.85f)).toDp()
                     }
                     val heroAlpha by animateFloatAsState(
                         targetValue = if (currentTab == FullPlayerTab.NOW_PLAYING) 1f else 0f,
