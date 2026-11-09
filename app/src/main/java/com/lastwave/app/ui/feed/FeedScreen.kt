@@ -111,9 +111,17 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -160,6 +168,7 @@ import com.lastwave.app.ui.common.HeaderActionIcon
 import com.lastwave.app.ui.common.TrackContextMenuSheet
 import com.lastwave.app.ui.common.TrackMiniTrayData
 import com.lastwave.app.ui.common.TrackMiniTraySheet
+import com.lastwave.app.ui.common.TopCurvedSectionClipShape
 import com.lastwave.app.ui.common.WindowSizeClass
 import com.lastwave.app.ui.common.rememberWindowSizeClass
 import com.lastwave.app.ui.common.TrackMenuCapabilities
@@ -348,7 +357,8 @@ fun FeedScreen(
         // header a sibling on top of it (never inside it: no self-capture).
         // Without glass (or on the transparent Podcasts hero) the list keeps
         // starting below the header exactly as before.
-        val feedGlass = com.lastwave.app.ui.theme.isLiquidGlassBackdropSupported() && !isPodcastsActive
+        val hasChips = state.homeChips.isNotEmpty()
+        val feedGlass = com.lastwave.app.ui.theme.isLiquidGlassBackdropSupported() && !isPodcastsActive && !hasChips
         val feedBackgroundColor = MaterialTheme.colorScheme.background
         val feedBackdrop = com.lastwave.app.ui.theme.rememberLayerBackdrop {
             drawRect(feedBackgroundColor)
@@ -727,10 +737,13 @@ fun FeedScreen(
 
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize().safeHorizontalContentPadding(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .safeHorizontalContentPadding()
+                        .clip(TopCurvedSectionClipShape(horizontalInset = 16.dp, cornerRadius = 28.dp, topInset = listTopInset)),
                     contentPadding = PaddingValues(
                         bottom = FloatingNavDefaults.contentBottomPadding(),
-                        top = 12.dp + listTopInset,
+                        top = 16.dp + listTopInset,
                     ),
                     verticalArrangement = Arrangement.Top,
                 ) {
@@ -1529,12 +1542,10 @@ fun FeedScreen(
                 },
             )
             if (state.homeChips.isNotEmpty()) {
-                // Page-coloured strip so the feed scrolling under the glass
-                // never shows through around the chips (looks as before).
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .then(if (useFeedGlass) Modifier.background(chipStripColor) else Modifier),
+                Surface(
+                    shape = RoundedCornerShape(bottomStart = 32.dp, bottomEnd = 32.dp),
+                    color = chipStripColor,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     PinnedChipsBar(
                         chips = state.homeChips,
@@ -1914,7 +1925,7 @@ private fun PinnedChipsBar(
     val haptics = LocalHapticFeedback.current
 
     Surface(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(26.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = modifier
             .fillMaxWidth()
