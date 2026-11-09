@@ -1,16 +1,16 @@
 diff --git a/app/src/main/java/com/lastwave/app/LastWaveApplication.kt b/app/src/main/java/com/lastwave/app/LastWaveApplication.kt
-index 48f5400..29ca4b4 100644
+index ee93bd6..302b656 100644
 --- a/app/src/main/java/com/lastwave/app/LastWaveApplication.kt
 +++ b/app/src/main/java/com/lastwave/app/LastWaveApplication.kt
-@@ -33,6 +33,7 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
+@@ -42,6 +42,7 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
      @Inject lateinit var trackDownloadManager: dagger.Lazy<com.lastwave.app.data.download.TrackDownloadManager>
      @Inject lateinit var discordPresenceManager: dagger.Lazy<com.lastwave.app.presence.DiscordPresenceManager>
      @Inject lateinit var appLocaleManager: dagger.Lazy<com.lastwave.app.util.AppLocaleManager>
 +    @Inject lateinit var replaySync: dagger.Lazy<com.lastwave.app.data.repository.ReplaySyncRepository>
+     @Inject lateinit var settingsPreferences: SettingsPreferences
  
-     override fun attachBaseContext(base: Context) {
-         // Pin the selected locale before any component (providers, services,
-@@ -129,6 +130,17 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
+     @Volatile private var cacheTrackingImageLoader: ImageLoader? = null
+@@ -141,6 +142,17 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
              runCatching { trackDownloadManager.get().syncDownloadsFromStorage() }
                  .onFailure { com.lastwave.app.diagnostics.AppLog.e("LastWaveStartup", "Download sync startup failed", it) }
          }
@@ -28,8 +28,8 @@ index 48f5400..29ca4b4 100644
          // Discord Rich Presence (no-ops unless the switch is on AND the Discord
          // app is installed and signed in). Observes playback state only; it can
          // never affect audio delivery, and every failure stays contained here so
-@@ -244,5 +256,6 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
-         const val LOW_RAM_IMAGE_DISK_CACHE_BYTES = 96L * 1024 * 1024
+@@ -288,5 +300,6 @@ class LastWaveApplication : Application(), ImageLoaderFactory {
+     private companion object {
          const val ORPHAN_TEMP_MAX_AGE_MS = 6L * 60 * 60 * 1000
          const val OPTIONAL_STARTUP_DELAY_MS = 2_500L
 +        const val REPLAY_SYNC_INTERVAL_MS = 30 * 60 * 1000L
@@ -1043,10 +1043,10 @@ index ccdf04d..a609790 100644
 +        database.playEventDao()
  }
 diff --git a/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt b/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
-index 35e18f0..db4156d 100644
+index bb93a71..28282b0 100644
 --- a/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
 +++ b/app/src/main/java/com/lastwave/app/playback/MusicPlayer.kt
-@@ -961,6 +961,8 @@ class MusicPlayer @Inject constructor(
+@@ -995,6 +995,8 @@ class MusicPlayer @Inject constructor(
                  artworkUrl = previousTrack.artworkUrl,
                  listenedMs = previousPositionMs,
                  completed = completedNaturally,
@@ -1102,7 +1102,7 @@ index f2b1f52..1f62236 100644
              PullToRefreshBox(
                  isRefreshing = uiState.isRefreshing,
 diff --git a/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt b/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
-index f7970b7..f714f56 100644
+index fd60bce..aeb224b 100644
 --- a/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
 +++ b/app/src/main/java/com/lastwave/app/ui/navigation/NavGraph.kt
 @@ -296,6 +296,7 @@ fun LastWaveNavHost(
@@ -1128,7 +1128,7 @@ index f7970b7..f714f56 100644
              PredictiveBackScreen(onBack = { navController.safePopBackStack(backStackEntry) }) {
                  GenresScreen(
 diff --git a/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt b/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt
-index 22659a6..df8deea 100644
+index 1566a3f..23714b1 100644
 --- a/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt
 +++ b/app/src/main/java/com/lastwave/app/ui/navigation/Screen.kt
 @@ -19,6 +19,7 @@ sealed class Screen(val route: String) {
@@ -1138,7 +1138,7 @@ index 22659a6..df8deea 100644
 +    data object Replay : Screen("replay")
      data object Search : Screen("search")
      data object Settings : Screen("settings")
-     data object Friends : Screen("friends")
+     data object Storage : Screen("storage")
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayFormat.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayFormat.kt
 new file mode 100644
 index 0000000..aac00f2
