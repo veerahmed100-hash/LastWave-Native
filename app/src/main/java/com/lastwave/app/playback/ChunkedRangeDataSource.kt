@@ -129,28 +129,36 @@ class ChunkedRangeDataSource(
      * Opens [chunkSpec]; on 403/410 swaps in a fresh URL for the same file
      * (at most [MAX_REFRESHES_PER_OPEN] times) and re-requests the same bytes.
      */
-    private fun openChunkRefreshingOnRejection(chunkSpec: DataSpec): Long {
-        var spec = chunkSpec
-        while (true) {
-            try {
-                return openUpstream(spec)
-            } catch (error: HttpDataSource.InvalidResponseCodeException) {
-                val refreshable = error.responseCode == 403 || error.responseCode == 410
-                if (!refreshable || refresher == null || refreshesThisOpen >= MAX_REFRESHES_PER_OPEN) throw error
-                refreshesThisOpen++
-                val replacement = runCatching { refresher.refresh(spec.uri) }.getOrNull() ?: throw error
-                spec = spec.buildUpon()
-                    .setUri(replacement.uri)
-                    .setHttpRequestHeaders(spec.httpRequestHeaders + replacement.requestHeaders)
-                    .build()
-                // Later chunks of this open continue on the new URL.
-                currentDataSpec = currentDataSpec?.buildUpon()
-                    ?.setUri(replacement.uri)
-                    ?.setHttpRequestHeaders(spec.httpRequestHeaders)
-                    ?.build()
-            }
+    
+private fun openChunkRefreshingOnRejection(chunkSpec: DataSpec): Long {
+    var spec = chunkSpec
+    while (true) {
+        try {
+            return openUpstream(spec)
+        } catch (error: HttpDataSource.InvalidResponseCodeException) {
+            val refreshable = error.responseCode == 403 || error.responseCode == 410
+            if (!refreshable || refreshesThisOpen >= MAX_REFRESHES_PER_OPEN) throw error
+
+            val activeRefresher = refresher ?: throw error
+
+            refreshesThisOpen++
+            val replacement = runCatching {
+                activeRefresher.refresh(spec.uri)
+            }.getOrNull() ?: throw error
+
+            spec = spec.buildUpon()
+                .setUri(replacement.uri)
+                .setHttpRequestHeaders(spec.httpRequestHeaders + replacement.requestHeaders)
+                .build()
+
+            // Later chunks of this open continue on the new URL.
+            currentDataSpec = currentDataSpec?.buildUpon()
+                ?.setUri(replacement.uri)
+                ?.setHttpRequestHeaders(spec.httpRequestHeaders)
+                ?.build()
         }
     }
+}
 
     /** Opens the next chunk; false only when the file is genuinely finished. */
     private fun openNextChunkOrEnd(): Boolean {
