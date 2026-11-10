@@ -184,10 +184,10 @@ index b15b701..6cab28a 100644
  }
 diff --git a/app/src/main/java/com/lastwave/app/data/local/db/PlayEventEntity.kt b/app/src/main/java/com/lastwave/app/data/local/db/PlayEventEntity.kt
 new file mode 100644
-index 0000000..0effe63
+index 0000000..d6522cd
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/data/local/db/PlayEventEntity.kt
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,208 @@
 +package com.lastwave.app.data.local.db
 +
 +import androidx.room.Dao
@@ -379,6 +379,10 @@ index 0000000..0effe63
 +    @Query("SELECT trackKey, playedAtMillis FROM play_events")
 +    suspend fun keys(): List<EventKey>
 +
++    /** Plays that started inside a time window, used to spot a play that is already counted. */
++    @Query("SELECT trackKey, playedAtMillis FROM play_events WHERE playedAtMillis >= :from AND playedAtMillis <= :to")
++    suspend fun keysBetween(from: Long, to: Long): List<EventKey>
++
 +    @Insert
 +    suspend fun insertAll(events: List<PlayEventEntity>)
 +
@@ -392,12 +396,473 @@ index 0000000..0effe63
 +        insertAll(events)
 +    }
 +}
+diff --git a/app/src/main/java/com/lastwave/app/data/repository/ReplayDedupe.kt b/app/src/main/java/com/lastwave/app/data/repository/ReplayDedupe.kt
+new file mode 100644
+index 0000000..bbccb5a
+--- /dev/null
++++ b/app/src/main/java/com/lastwave/app/data/repository/ReplayDedupe.kt
+@@ -0,0 +1,57 @@
++package com.lastwave.app.data.repository
++
++import java.util.Locale
++import kotlin.math.abs
++
++/**
++ * Two entries for the same song that start closer together than this are one
++ * play. This is what stops a single listen from being counted two or three
++ * times when it reaches Replay from more than one place (this phone, a Last.fm
++ * import, another phone through GitHub sync).
++ */
++const val PLAY_DEDUPE_WINDOW_MS = 120_000L
++
++private val BRACKETS = Regex("""[(\[{][^)\]}]*[)\]}]""")
++private val FEATURING = Regex("""\s+(feat\.?|ft\.?|featuring)\s+.*$""", RegexOption.IGNORE_CASE)
++private val NOT_ALNUM = Regex("""[^\p{L}\p{N}]+""")
++private val ARTIST_SPLIT = Regex("""\s*(,|&|;|/|\s+x\s+|\s+and\s+)\s*""", RegexOption.IGNORE_CASE)
++
++/** Lower-cases and strips "(Remastered)", "feat. X", punctuation and spaces, for comparing only. */
++internal fun normalizeForMatch(text: String): String {
++    var s = text.lowercase(Locale.ROOT)
++    s = BRACKETS.replace(s, " ")
++    s = FEATURING.replace(s, "")
++    val squashed = NOT_ALNUM.replace(s, "")
++    return squashed.ifEmpty { text.trim().lowercase(Locale.ROOT) }
++}
++
++private fun normalizeArtist(artist: String): String =
++    normalizeForMatch(artist.split(ARTIST_SPLIT).firstOrNull().orEmpty().ifBlank { artist })
++
++/** Comparison key for a stored trackKey ("title|artist", lower-cased). */
++internal fun matchKeyFromTrackKey(trackKey: String): String {
++    val cut = trackKey.lastIndexOf('|')
++    if (cut < 0) return normalizeForMatch(trackKey) + "|"
++    return normalizeForMatch(trackKey.substring(0, cut)) + "|" + normalizeArtist(trackKey.substring(cut + 1))
++}
++
++/** In-memory list of plays already known, used to spot near-identical new ones. */
++class PlayIndex {
++    private val byKey = HashMap<String, MutableList<Long>>()
++
++    fun add(trackKey: String, playedAtMillis: Long) {
++        byKey.getOrPut(matchKeyFromTrackKey(trackKey)) { ArrayList() }.add(playedAtMillis)
++    }
++
++    fun containsNear(trackKey: String, playedAtMillis: Long, windowMs: Long = PLAY_DEDUPE_WINDOW_MS): Boolean {
++        val times = byKey[matchKeyFromTrackKey(trackKey)] ?: return false
++        return times.any { abs(it - playedAtMillis) < windowMs }
++    }
++
++    /** Records the play and returns true, or returns false if a near-identical one is already known. */
++    fun addIfNew(trackKey: String, playedAtMillis: Long): Boolean {
++        if (containsNear(trackKey, playedAtMillis)) return false
++        add(trackKey, playedAtMillis)
++        return true
++    }
++}
+diff --git a/app/src/main/java/com/lastwave/app/data/repository/ReplayImportRepository.kt b/app/src/main/java/com/lastwave/app/data/repository/ReplayImportRepository.kt
+new file mode 100644
+index 0000000..60dc024
+--- /dev/null
++++ b/app/src/main/java/com/lastwave/app/data/repository/ReplayImportRepository.kt
+@@ -0,0 +1,392 @@
++package com.lastwave.app.data.repository
++
++import android.content.Context
++import com.lastwave.app.data.genre.GenreResolver
++import com.lastwave.app.data.local.SessionData
++import com.lastwave.app.data.local.SessionPreferences
++import com.lastwave.app.data.local.db.PlayEventDao
++import com.lastwave.app.data.local.db.PlayEventEntity
++import com.lastwave.app.data.network.ITunesSearchClient
++import com.lastwave.app.data.network.ITunesSong
++import com.lastwave.app.data.network.LastFmApiService
++import dagger.hilt.android.qualifiers.ApplicationContext
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withTimeoutOrNull
++import kotlinx.serialization.Serializable
++import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.JsonArray
++import kotlinx.serialization.json.JsonElement
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.JsonPrimitive
++import kotlinx.serialization.json.contentOrNull
++import kotlinx.serialization.json.intOrNull
++import kotlinx.serialization.json.jsonObject
++import java.io.IOException
++import java.time.LocalDate
++import java.time.ZoneId
++import java.util.concurrent.atomic.AtomicBoolean
++import javax.inject.Inject
++import javax.inject.Singleton
++
++/** How far back an import reaches. [NEW] continues from the last import. */
++enum class ReplayImportScope(val label: String, val hint: String) {
++    NEW("New plays only", "Everything since your last import"),
++    MONTH("Last 30 days", "Quick, good for a first try"),
++    YEAR("This year", "From 1 January"),
++    ALL("All history", "Every scrobble you have. Can take a while."),
++}
++
++sealed interface ReplayImportStatus {
++    data object Idle : ReplayImportStatus
++
++    data class Running(val page: Int, val totalPages: Int, val added: Int) : ReplayImportStatus
++
++    data class Done(val atMillis: Long, val added: Int, val skipped: Int) : ReplayImportStatus
++
++    data class Failed(val message: String) : ReplayImportStatus
++}
++
++internal data class ImportedScrobble(
++    val title: String,
++    val artist: String,
++    val album: String?,
++    val artworkUrl: String?,
++    val uts: Long,
++)
++
++internal class ImportPage(val scrobbles: List<ImportedScrobble>, val totalPages: Int)
++
++/** What we learned about one song. [d] is the full length in ms, 0 when nobody could tell us. */
++@Serializable
++internal data class ImportedTrackMeta(
++    val d: Long = 0L,
++    val g: String = "",
++    val al: String? = null,
++    val u: String? = null,
++    val at: Long = 0L,
++)
++
++private class ReplayImportException(message: String) : Exception(message)
++
++/**
++ * Fills Replay from the listener's Last.fm scrobbles, so plays made in another
++ * LastWave build (for example the official one with the hi-res add-on) still
++ * show up in Replay.
++ *
++ * - Scrobbles are read with the Last.fm API key and username already saved in
++ *   Settings. No other key is needed.
++ * - Last.fm doesn't say how long a song is, so the full length comes from the
++ *   iTunes Search API (no key), then Last.fm's own track.getInfo, and finally a
++ *   3.5 minute average. Every answer is cached, one lookup per song.
++ * - A scrobble is skipped when the same song is already stored within
++ *   [PLAY_DEDUPE_WINDOW_MS], so nothing is counted twice.
++ */
++@Singleton
++class ReplayImportRepository @Inject constructor(
++    @ApplicationContext private val context: Context,
++    private val api: LastFmApiService,
++    private val sessionPreferences: SessionPreferences,
++    private val iTunes: ITunesSearchClient,
++    private val genreResolver: GenreResolver,
++    private val replay: ReplayRepository,
++    private val syncRepository: ReplaySyncRepository,
++    private val dao: PlayEventDao,
++) {
++    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
++    private val metaPrefs = context.getSharedPreferences(META_PREFS, Context.MODE_PRIVATE)
++    private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; isLenient = true }
++
++    // Runs on its own scope so an import keeps going when the Replay screen is closed.
++    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++    private val running = AtomicBoolean(false)
++    private var lastITunesAt = 0L
++
++    private val _status = MutableStateFlow<ReplayImportStatus>(ReplayImportStatus.Idle)
++    val status: StateFlow<ReplayImportStatus> = _status.asStateFlow()
++
++    fun username(): String = sessionPreferences.currentSession.username
++
++    fun lastImportMillis(): Long = prefs.getLong(KEY_LAST_OK, 0L)
++
++    fun hasImportedBefore(): Boolean = prefs.getLong(KEY_LAST_TS, 0L) > 0L
++
++    /** Quietly fetches new scrobbles when Replay opens, but only after a first manual import. */
++    fun autoImportIfDue() {
++        if (!hasImportedBefore()) return
++        val session = sessionPreferences.currentSession
++        if (session.apiKey.isBlank() || session.username.isBlank()) return
++        if (System.currentTimeMillis() - prefs.getLong(KEY_LAST_TRY, 0L) < AUTO_INTERVAL_MS) return
++        start(ReplayImportScope.NEW)
++    }
++
++    fun start(scope: ReplayImportScope) {
++        if (!running.compareAndSet(false, true)) return
++        prefs.edit().putLong(KEY_LAST_TRY, System.currentTimeMillis()).apply()
++        _status.value = ReplayImportStatus.Running(0, 0, 0)
++        appScope.launch {
++            try {
++                val session = sessionPreferences.currentSession
++                if (session.apiKey.isBlank() || session.username.isBlank()) {
++                    throw ReplayImportException("Sign in to Last.fm in Settings first.")
++                }
++                val outcome = importPages(session, scope)
++                val now = System.currentTimeMillis()
++                prefs.edit().putLong(KEY_LAST_OK, now).apply()
++                _status.value = ReplayImportStatus.Done(now, outcome.first, outcome.second)
++                // Share the new plays with the other phone right away, if sync is set up.
++                if (outcome.first > 0) syncRepository.syncNow(force = false)
++            } catch (e: ReplayImportException) {
++                _status.value = ReplayImportStatus.Failed(e.message ?: "Import failed")
++            } catch (e: CancellationException) {
++                throw e
++            } catch (e: IOException) {
++                _status.value = ReplayImportStatus.Failed("No connection to Last.fm")
++            } catch (e: Exception) {
++                _status.value = ReplayImportStatus.Failed(e.message ?: "Import failed")
++            } finally {
++                running.set(false)
++            }
++        }
++    }
++
++    /** Returns (plays added, scrobbles skipped as already counted). */
++    private suspend fun importPages(session: SessionData, scope: ReplayImportScope): Pair<Int, Int> {
++        val fromSec = fromSeconds(scope)
++        val known = PlayIndex()
++        dao.keys().forEach { known.add(it.trackKey, it.playedAtMillis) }
++
++        var page = 1
++        var totalPages = 1
++        var added = 0
++        var skipped = 0
++        var newest = 0L
++        while (page <= totalPages) {
++            val result = fetchPage(session, page, fromSec)
++            totalPages = result.totalPages.coerceAtLeast(1)
++
++            val fresh = ArrayList<ImportedScrobble>()
++            for (s in result.scrobbles) {
++                if (s.uts > newest) newest = s.uts
++                val key = trackKeyOf(s.title, s.artist)
++                if (known.addIfNew(key, s.uts * 1000L)) fresh += s else skipped++
++            }
++            if (fresh.isNotEmpty()) {
++                val events = fresh.map { toEvent(session, it) }
++                val inserted = replay.addIfNew(events)
++                added += inserted
++                skipped += events.size - inserted
++            }
++            _status.value = ReplayImportStatus.Running(page, totalPages, added)
++            page++
++            if (page <= totalPages) delay(PAGE_GAP_MS)
++        }
++        if (newest > prefs.getLong(KEY_LAST_TS, 0L)) prefs.edit().putLong(KEY_LAST_TS, newest).apply()
++        return added to skipped
++    }
++
++    private fun fromSeconds(scope: ReplayImportScope): Long {
++        val zone = ZoneId.systemDefault()
++        return when (scope) {
++            ReplayImportScope.NEW -> {
++                val last = prefs.getLong(KEY_LAST_TS, 0L)
++                if (last > 0L) (last - OVERLAP_SEC).coerceAtLeast(0L) else startOfYearSec(zone)
++            }
++            ReplayImportScope.MONTH -> System.currentTimeMillis() / 1000L - 30L * 24L * 3600L
++            ReplayImportScope.YEAR -> startOfYearSec(zone)
++            ReplayImportScope.ALL -> 0L
++        }
++    }
++
++    private fun startOfYearSec(zone: ZoneId): Long =
++        LocalDate.now(zone).withDayOfYear(1).atStartOfDay(zone).toEpochSecond()
++
++    private fun trackKeyOf(title: String, artist: String): String =
++        "${title.trim()}|${artist.trim()}".lowercase()
++
++    // ---- Last.fm -----------------------------------------------------------
++
++    private suspend fun fetchPage(session: SessionData, page: Int, fromSec: Long): ImportPage {
++        val params = HashMap<String, String>()
++        params["method"] = "user.getrecenttracks"
++        params["user"] = session.username
++        params["api_key"] = session.apiKey
++        params["format"] = "json"
++        params["limit"] = PAGE_SIZE.toString()
++        params["page"] = page.toString()
++        if (fromSec > 0L) params["from"] = fromSec.toString()
++
++        var lastError = "Last.fm didn't answer. Try again in a minute."
++        for (attempt in 0 until MAX_ATTEMPTS) {
++            try {
++                val response = api.get(params)
++                val body = (if (response.isSuccessful) response.body()?.string() else response.errorBody()?.string()).orEmpty()
++                val root = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
++                val code = (root?.get("error") as? JsonPrimitive)?.intOrNull
++                if (root != null && code != null) {
++                    when (code) {
++                        6 -> throw ReplayImportException("Last.fm doesn't know the user \"${session.username}\".")
++                        10, 26 -> throw ReplayImportException("Last.fm rejected your API key. Check it in Settings.")
++                        17 -> throw ReplayImportException(
++                            "Your Last.fm listening history is private. On last.fm open Settings, Privacy, " +
++                                "and untick \"Hide recent listening information\".",
++                        )
++                        8, 11, 16, 29 -> lastError = "Last.fm is busy right now. Try again in a minute."
++                        else -> throw ReplayImportException(root.str("message").ifBlank { "Last.fm error $code" })
++                    }
++                } else if (response.isSuccessful && root != null) {
++                    return parsePage(root)
++                } else {
++                    lastError = "Last.fm error ${response.code()}"
++                }
++            } catch (e: ReplayImportException) {
++                throw e
++            } catch (e: CancellationException) {
++                throw e
++            } catch (e: IOException) {
++                lastError = "No connection to Last.fm"
++            }
++            delay(RETRY_GAP_MS * (attempt + 1))
++        }
++        throw ReplayImportException(lastError)
++    }
++
++    private fun parsePage(root: JsonObject): ImportPage {
++        val recent = root["recenttracks"] as? JsonObject
++            ?: throw ReplayImportException("Last.fm sent an answer this app doesn't understand.")
++        val attr = recent["@attr"] as? JsonObject
++        val totalPages = attr?.str("totalPages")?.toIntOrNull() ?: 1
++        val scrobbles = recent["track"].asObjects().mapNotNull { t ->
++            // The song playing right now has no date yet; it is picked up on a later import.
++            val uts = (t["date"] as? JsonObject)?.str("uts")?.toLongOrNull() ?: return@mapNotNull null
++            val title = t.str("name")
++            val artistEl = t["artist"]
++            val artist = (artistEl as? JsonObject)?.str("#text")
++                ?: (artistEl as? JsonPrimitive)?.contentOrNull.orEmpty()
++            if (title.isBlank() || artist.isBlank()) return@mapNotNull null
++            val album = (t["album"] as? JsonObject)?.str("#text")?.takeIf { it.isNotBlank() }
++            val art = t["image"].asObjects()
++                .map { it.str("#text") }
++                .lastOrNull { it.isNotBlank() && !it.contains(NO_ART_HASH) }
++            ImportedScrobble(title, artist, album, art, uts)
++        }
++        return ImportPage(scrobbles, totalPages)
++    }
++
++    private suspend fun lastFmDurationMs(apiKey: String, title: String, artist: String): Long {
++        val response = api.get(
++            mapOf(
++                "method" to "track.getInfo",
++                "track" to title,
++                "artist" to artist,
++                "autocorrect" to "1",
++                "api_key" to apiKey,
++                "format" to "json",
++            ),
++        )
++        if (!response.isSuccessful) return 0L
++        val body = response.body()?.string().orEmpty()
++        val track = json.parseToJsonElement(body).jsonObject["track"] as? JsonObject ?: return 0L
++        return track.str("duration").toLongOrNull() ?: 0L
++    }
++
++    // ---- Song details: length, genre, cover ----------------------------------
++
++    private suspend fun toEvent(session: SessionData, s: ImportedScrobble): PlayEventEntity {
++        val key = trackKeyOf(s.title, s.artist)
++        val meta = resolveMeta(session, key, s)
++        return PlayEventEntity(
++            trackKey = key,
++            title = s.title.trim(),
++            artist = s.artist.trim(),
++            album = s.album ?: meta.al?.takeIf { it.isNotBlank() },
++            artworkUrl = s.artworkUrl ?: meta.u,
++            genres = meta.g,
++            playedAtMillis = s.uts * 1000L,
++            listenedMs = if (meta.d > 0L) meta.d else DEFAULT_LENGTH_MS,
++        )
++    }
++
++    private suspend fun resolveMeta(session: SessionData, key: String, s: ImportedScrobble): ImportedTrackMeta {
++        readMeta(key)?.let { cached ->
++            val stillUnknown = cached.d <= 0L
++            if (!stillUnknown || System.currentTimeMillis() - cached.at < RETRY_UNKNOWN_MS) return cached
++        }
++
++        // 1) iTunes Search (no key): exact length, plus album, cover and genre.
++        val song: ITunesSong? = withTimeoutOrNull(LOOKUP_TIMEOUT_MS) { throttledITunes(s.title, s.artist) }
++        var duration = song?.trackTimeMillis ?: 0L
++
++        // 2) Last.fm's own idea of the length.
++        if (duration <= 0L) {
++            duration = withTimeoutOrNull(LOOKUP_TIMEOUT_MS) {
++                runCatching { lastFmDurationMs(session.apiKey, s.title, s.artist) }.getOrDefault(0L)
++            } ?: 0L
++        }
++
++        val genres = withTimeoutOrNull(LOOKUP_TIMEOUT_MS) {
++            runCatching { genreResolver.resolve(s.title, s.artist) }.getOrDefault("")
++        }.orEmpty()
++
++        val meta = ImportedTrackMeta(
++            d = duration.coerceAtLeast(0L),
++            g = genres,
++            al = song?.collectionName,
++            u = song?.artworkUrl100?.replace("100x100bb", "600x600bb"),
++            at = System.currentTimeMillis(),
++        )
++        writeMeta(key, meta)
++        return meta
++    }
++
++    /** iTunes asks for roughly 20 searches a minute, so searches are spaced out. */
++    private suspend fun throttledITunes(title: String, artist: String): ITunesSong? {
++        val wait = ITUNES_GAP_MS - (System.currentTimeMillis() - lastITunesAt)
++        if (wait > 0L) delay(wait)
++        lastITunesAt = System.currentTimeMillis()
++        return runCatching { iTunes.searchBestMatch(title, artist) }.getOrNull()
++    }
++
++    private fun readMeta(key: String): ImportedTrackMeta? =
++        metaPrefs.getString(key, null)?.let {
++            runCatching { json.decodeFromString(ImportedTrackMeta.serializer(), it) }.getOrNull()
++        }
++
++    private fun writeMeta(key: String, meta: ImportedTrackMeta) {
++        metaPrefs.edit().putString(key, json.encodeToString(ImportedTrackMeta.serializer(), meta)).apply()
++    }
++
++    private companion object {
++        const val PREFS = "replay_import"
++        const val META_PREFS = "replay_import_meta"
++        const val KEY_LAST_TS = "last_scrobble_ts"
++        const val KEY_LAST_OK = "last_ok"
++        const val KEY_LAST_TRY = "last_try"
++        const val PAGE_SIZE = 200
++        const val MAX_ATTEMPTS = 4
++        const val PAGE_GAP_MS = 250L
++        const val RETRY_GAP_MS = 2_000L
++        const val OVERLAP_SEC = 300L
++        const val AUTO_INTERVAL_MS = 15 * 60 * 1000L
++        const val ITUNES_GAP_MS = 1_200L
++        const val LOOKUP_TIMEOUT_MS = 20_000L
++        const val RETRY_UNKNOWN_MS = 3L * 24L * 3600L * 1000L
++        const val DEFAULT_LENGTH_MS = 210_000L
++        const val NO_ART_HASH = "2a96cbd8b46e442fc41c2b86b821562f"
++    }
++}
++
++private fun JsonObject.str(key: String): String = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
++
++private fun JsonElement?.asObjects(): List<JsonObject> = when (this) {
++    is JsonArray -> this.mapNotNull { it as? JsonObject }
++    is JsonObject -> listOf(this)
++    else -> emptyList()
++}
 diff --git a/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt b/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt
 new file mode 100644
-index 0000000..ba05d9d
+index 0000000..376ae15
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/data/repository/ReplayRepository.kt
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,253 @@
 +package com.lastwave.app.data.repository
 +
 +import com.lastwave.app.data.artwork.ArtworkRepository
@@ -407,6 +872,8 @@ index 0000000..ba05d9d
 +import kotlinx.coroutines.async
 +import kotlinx.coroutines.awaitAll
 +import kotlinx.coroutines.coroutineScope
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
 +import kotlinx.coroutines.withTimeoutOrNull
 +import java.time.DayOfWeek
 +import java.time.LocalDate
@@ -468,6 +935,10 @@ index 0000000..ba05d9d
 +    private val genreResolver: GenreResolver,
 +    private val artworkRepository: ArtworkRepository,
 +) {
++    // Checking for a duplicate and saving must happen together, or two copies of
++    // one listen that arrive at the same moment could both get in.
++    private val insertMutex = Mutex()
++
 +    /**
 +     * Saves one play if the track was heard long enough: half its length or
 +     * 4 minutes, whichever is shorter, and never under 30 seconds (the same
@@ -494,18 +965,44 @@ index 0000000..ba05d9d
 +            runCatching { genreResolver.resolve(title, artist) }.getOrDefault("")
 +        }.orEmpty()
 +
-+        dao.insert(
-+            PlayEventEntity(
-+                trackKey = "${title.trim()}|${artist.trim()}".lowercase(),
-+                title = title.trim(),
-+                artist = artist.trim(),
-+                album = album?.trim()?.takeIf { it.isNotEmpty() },
-+                artworkUrl = artworkUrl,
-+                genres = genres,
-+                playedAtMillis = System.currentTimeMillis() - listenedMs,
-+                listenedMs = listenedMs,
-+            ),
-+        )
++        val trackKey = "${title.trim()}|${artist.trim()}".lowercase()
++        val playedAt = System.currentTimeMillis() - listenedMs
++        insertMutex.withLock {
++            // Skip it if this listen is already stored, for example because it came
++            // in through a Last.fm import or from the other phone.
++            val matchKey = matchKeyFromTrackKey(trackKey)
++            val nearby = dao.keysBetween(playedAt - PLAY_DEDUPE_WINDOW_MS, playedAt + PLAY_DEDUPE_WINDOW_MS)
++            if (nearby.any { matchKeyFromTrackKey(it.trackKey) == matchKey }) return@withLock
++            dao.insert(
++                PlayEventEntity(
++                    trackKey = trackKey,
++                    title = title.trim(),
++                    artist = artist.trim(),
++                    album = album?.trim()?.takeIf { it.isNotEmpty() },
++                    artworkUrl = artworkUrl,
++                    genres = genres,
++                    playedAtMillis = playedAt,
++                    listenedMs = listenedMs,
++                ),
++            )
++        }
++    }
++
++    /**
++     * Saves plays that came from outside (the Last.fm import), leaving out any
++     * that are already stored. Returns how many were really added.
++     */
++    suspend fun addIfNew(events: List<PlayEventEntity>): Int {
++        if (events.isEmpty()) return 0
++        return insertMutex.withLock {
++            val known = PlayIndex()
++            val from = events.minOf { it.playedAtMillis } - PLAY_DEDUPE_WINDOW_MS
++            val to = events.maxOf { it.playedAtMillis } + PLAY_DEDUPE_WINDOW_MS
++            dao.keysBetween(from, to).forEach { known.add(it.trackKey, it.playedAtMillis) }
++            val fresh = events.filter { known.addIfNew(it.trackKey, it.playedAtMillis) }
++            if (fresh.isNotEmpty()) dao.insertAll(fresh)
++            fresh.size
++        }
 +    }
 +
 +    suspend fun summary(period: ReplayPeriod): ReplaySummary {
@@ -621,10 +1118,10 @@ index 0000000..ba05d9d
 +}
 diff --git a/app/src/main/java/com/lastwave/app/data/repository/ReplaySyncRepository.kt b/app/src/main/java/com/lastwave/app/data/repository/ReplaySyncRepository.kt
 new file mode 100644
-index 0000000..e1d4ffc
+index 0000000..b83ffae
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/data/repository/ReplaySyncRepository.kt
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,330 @@
 +package com.lastwave.app.data.repository
 +
 +import android.content.Context
@@ -806,7 +1303,8 @@ index 0000000..e1d4ffc
 +        val listing = listFolder(cfg)
 +        val myName = "replay-${deviceId()}.json"
 +
-+        val knownKeys = dao.keys().mapTo(HashSet()) { "${it.trackKey}|${it.playedAtMillis}" }
++        val knownPlays = PlayIndex()
++        dao.keys().forEach { knownPlays.add(it.trackKey, it.playedAtMillis) }
 +        val incoming = ArrayList<PlayEventEntity>()
 +        for (entry in listing) {
 +            val name = entry.name
@@ -816,7 +1314,7 @@ index 0000000..e1d4ffc
 +            val body = call(cfg, "GET", "/repos/${cfg.repo}/contents/$FOLDER/$name", raw = true)
 +            val file = runCatching { json.decodeFromString<SyncFile>(body) }.getOrNull() ?: continue
 +            for (e in file.events) {
-+                if (knownKeys.add("${e.k}|${e.p}")) {
++                if (knownPlays.addIfNew(e.k, e.p)) {
 +                    incoming += PlayEventEntity(
 +                        trackKey = e.k,
 +                        title = e.t,
@@ -1243,6 +1741,168 @@ index 0000000..aac00f2
 +    val tail = "${formatMinutes(row.ms)} · ${plural(row.plays, "Play")}"
 +    return if (page == StoryPage.ARTIST) tail else listOfNotNull(row.subtitle, tail).joinToString("\n")
 +}
+diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayImportSheet.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayImportSheet.kt
+new file mode 100644
+index 0000000..cad2ba5
+--- /dev/null
++++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayImportSheet.kt
+@@ -0,0 +1,156 @@
++package com.lastwave.app.ui.replay
++
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material3.Button
++import androidx.compose.material3.ButtonDefaults
++import androidx.compose.material3.ExperimentalMaterial3Api
++import androidx.compose.material3.ModalBottomSheet
++import androidx.compose.material3.RadioButton
++import androidx.compose.material3.RadioButtonDefaults
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import com.lastwave.app.data.repository.ReplayImportScope
++import com.lastwave.app.data.repository.ReplayImportStatus
++import java.text.DateFormat
++import java.util.Date
++
++/**
++ * Pulls plays from the listener's Last.fm account into Replay, so listening
++ * done in another LastWave build still counts. Needs the Last.fm sign-in that
++ * is already set up in Settings.
++ */
++@OptIn(ExperimentalMaterial3Api::class)
++@Composable
++fun ReplayImportSheet(
++    username: String,
++    status: ReplayImportStatus,
++    lastImportMillis: Long,
++    hasImportedBefore: Boolean,
++    onImport: (ReplayImportScope) -> Unit,
++    onDismiss: () -> Unit,
++) {
++    val options = if (hasImportedBefore) {
++        listOf(ReplayImportScope.NEW, ReplayImportScope.MONTH, ReplayImportScope.YEAR, ReplayImportScope.ALL)
++    } else {
++        listOf(ReplayImportScope.MONTH, ReplayImportScope.YEAR, ReplayImportScope.ALL)
++    }
++    var choice by remember { mutableStateOf(if (hasImportedBefore) ReplayImportScope.NEW else ReplayImportScope.YEAR) }
++    val running = status is ReplayImportStatus.Running
++    val signedIn = username.isNotBlank()
++
++    ModalBottomSheet(
++        onDismissRequest = onDismiss,
++        containerColor = Color(0xFF1C1C1F),
++        contentColor = Color.White,
++    ) {
++        Column(
++            Modifier
++                .fillMaxWidth()
++                .verticalScroll(rememberScrollState())
++                .padding(horizontal = 24.dp)
++                .padding(bottom = 32.dp),
++            verticalArrangement = Arrangement.spacedBy(10.dp),
++        ) {
++            Text("Import from Last.fm", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
++            ImportMuted(
++                "Plays you make in another LastWave build, such as the official one with hi-res audio, " +
++                    "are scrobbled to Last.fm. This adds them to your Replay with each song's full length. " +
++                    "A song that is already counted is never counted twice.",
++            )
++
++            if (!signedIn) {
++                ImportMuted("Sign in to Last.fm in Settings first, then come back here.")
++            } else {
++                ImportMuted("Last.fm account: $username")
++                for (option in options) {
++                    Row(
++                        Modifier
++                            .fillMaxWidth()
++                            .clickable(enabled = !running) { choice = option },
++                        verticalAlignment = Alignment.CenterVertically,
++                    ) {
++                        RadioButton(
++                            selected = choice == option,
++                            onClick = { choice = option },
++                            enabled = !running,
++                            colors = RadioButtonDefaults.colors(
++                                selectedColor = Color.White,
++                                unselectedColor = Color.White.copy(alpha = 0.5f),
++                            ),
++                        )
++                        Column(Modifier.padding(start = 4.dp)) {
++                            Text(option.label, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
++                            ImportMuted(option.hint)
++                        }
++                    }
++                }
++                Text(importStatusLine(status, lastImportMillis), fontSize = 15.sp)
++                Spacer(Modifier.height(4.dp))
++                Button(
++                    onClick = { onImport(choice) },
++                    enabled = !running,
++                    modifier = Modifier.fillMaxWidth(),
++                    colors = ButtonDefaults.buttonColors(
++                        containerColor = Color.White,
++                        contentColor = Color.Black,
++                        disabledContainerColor = Color.White.copy(alpha = 0.25f),
++                        disabledContentColor = Color.White.copy(alpha = 0.6f),
++                    ),
++                    shape = RoundedCornerShape(14.dp),
++                ) {
++                    Text(
++                        if (running) "Importing…" else "Import",
++                        fontSize = 16.sp,
++                        fontWeight = FontWeight.Bold,
++                        modifier = Modifier.padding(vertical = 4.dp),
++                    )
++                }
++                ImportMuted(
++                    "Song lengths come from the iTunes Search API, so a first import of a long history " +
++                        "takes a few minutes. You can close this sheet and it keeps going. " +
++                        "After the first import, new plays are fetched each time Replay opens.",
++                )
++            }
++        }
++    }
++}
++
++private fun importStatusLine(status: ReplayImportStatus, lastImportMillis: Long): String = when (status) {
++    ReplayImportStatus.Idle ->
++        if (lastImportMillis > 0L) "Last import ${importTime(lastImportMillis)}." else "Nothing imported yet."
++    is ReplayImportStatus.Running ->
++        if (status.totalPages <= 0) "Contacting Last.fm…"
++        else "Importing page ${status.page} of ${status.totalPages}, ${status.added} new plays so far…"
++    is ReplayImportStatus.Done ->
++        "Imported ${importTime(status.atMillis)}: ${status.added} new plays" +
++            if (status.skipped > 0) ", ${status.skipped} skipped because they were already counted." else "."
++    is ReplayImportStatus.Failed -> "Import failed: ${status.message}"
++}
++
++private fun importTime(millis: Long): String =
++    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(millis))
++
++@Composable
++private fun ImportMuted(text: String) {
++    Text(text, color = Color.White.copy(alpha = 0.62f), fontSize = 14.sp, lineHeight = 20.sp)
++}
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayPoster.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayPoster.kt
 new file mode 100644
 index 0000000..8a9e0f6
@@ -1478,10 +2138,10 @@ index 0000000..8a9e0f6
 +}
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt
 new file mode 100644
-index 0000000..da5bb1b
+index 0000000..954a24c
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayScreen.kt
-@@ -0,0 +1,613 @@
+@@ -0,0 +1,631 @@
 +package com.lastwave.app.ui.replay
 +
 +import android.graphics.Bitmap
@@ -1516,6 +2176,7 @@ index 0000000..da5bb1b
 +import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 +import androidx.compose.material.icons.filled.GraphicEq
 +import androidx.compose.material.icons.filled.PlayArrow
++import androidx.compose.material.icons.filled.Download
 +import androidx.compose.material.icons.filled.Sync
 +import androidx.compose.material.icons.filled.Share
 +import androidx.compose.material3.CircularProgressIndicator
@@ -1575,6 +2236,8 @@ index 0000000..da5bb1b
 +    var posterName by remember { mutableStateOf("poster") }
 +    var rendering by remember { mutableStateOf(false) }
 +    var showSync by remember { mutableStateOf(false) }
++    var showImport by remember { mutableStateOf(false) }
++    val importStatus by viewModel.importStatus.collectAsStateWithLifecycle()
 +    val syncStatus by viewModel.syncStatus.collectAsStateWithLifecycle()
 +    val syncConfig by viewModel.syncConfig.collectAsStateWithLifecycle()
 +
@@ -1692,6 +2355,10 @@ index 0000000..da5bb1b
 +                }
 +            }
 +
++            item(key = "import") {
++                ActionRow(Icons.Filled.Download, "Import from Last.fm", topPadding = 0) { showImport = true }
++            }
++
 +            item(key = "sync") {
 +                ActionRow(
 +                    Icons.Filled.Sync,
@@ -1710,6 +2377,17 @@ index 0000000..da5bb1b
 +                onShare = { page -> requestShare(page) },
 +            )
 +        }
++    }
++
++    if (showImport) {
++        ReplayImportSheet(
++            username = viewModel.lastFmUsername(),
++            status = importStatus,
++            lastImportMillis = viewModel.lastImportMillis(),
++            hasImportedBefore = viewModel.hasImportedBefore(),
++            onImport = viewModel::importLastFm,
++            onDismiss = { showImport = false },
++        )
 +    }
 +
 +    if (showSync) {
@@ -3252,14 +3930,17 @@ index 0000000..d0a26b9
 +}
 diff --git a/app/src/main/java/com/lastwave/app/ui/replay/ReplayViewModel.kt b/app/src/main/java/com/lastwave/app/ui/replay/ReplayViewModel.kt
 new file mode 100644
-index 0000000..fe73c30
+index 0000000..5901411
 --- /dev/null
 +++ b/app/src/main/java/com/lastwave/app/ui/replay/ReplayViewModel.kt
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,101 @@
 +package com.lastwave.app.ui.replay
 +
 +import androidx.lifecycle.ViewModel
 +import androidx.lifecycle.viewModelScope
++import com.lastwave.app.data.repository.ReplayImportRepository
++import com.lastwave.app.data.repository.ReplayImportScope
++import com.lastwave.app.data.repository.ReplayImportStatus
 +import com.lastwave.app.data.repository.ReplayPeriod
 +import com.lastwave.app.data.repository.ReplayRepository
 +import com.lastwave.app.data.repository.ReplaySummary
@@ -3287,7 +3968,14 @@ index 0000000..fe73c30
 +class ReplayViewModel @Inject constructor(
 +    private val repository: ReplayRepository,
 +    private val syncRepository: ReplaySyncRepository,
++    private val importRepository: ReplayImportRepository,
 +) : ViewModel() {
++
++    val importStatus: StateFlow<ReplayImportStatus> = importRepository.status
++    fun lastFmUsername(): String = importRepository.username()
++    fun lastImportMillis(): Long = importRepository.lastImportMillis()
++    fun hasImportedBefore(): Boolean = importRepository.hasImportedBefore()
++    fun importLastFm(scope: ReplayImportScope) = importRepository.start(scope)
 +
 +    val syncStatus: StateFlow<ReplaySyncStatus> = syncRepository.status
 +    val syncConfig: StateFlow<ReplaySyncConfig?> = syncRepository.config
@@ -3303,6 +3991,14 @@ index 0000000..fe73c30
 +        // Pull in plays from the other phone whenever Replay is opened, and
 +        // refresh the charts if anything new arrived.
 +        viewModelScope.launch { syncRepository.syncIfDue() }
++        // Once Last.fm has been imported at least once, quietly fetch newer plays
++        // whenever Replay opens, and refresh the charts when some arrive.
++        importRepository.autoImportIfDue()
++        viewModelScope.launch {
++            importRepository.status.collect { status ->
++                if (status is ReplayImportStatus.Done && status.added > 0) load(_state.value.period)
++            }
++        }
 +        viewModelScope.launch {
 +            syncRepository.status.collect { status ->
 +                if (status is ReplaySyncStatus.Done && status.added > 0) load(_state.value.period)
